@@ -2,68 +2,38 @@
 
 Wi-Fi photo uploads for a digital photo frame that only reads USB drives.
 
-An ESP32-S3 SuperMini plugs into the frame's USB port. The frame sees a
-read-only USB flash drive backed by a microSD card, while the S3 joins the home
-Wi-Fi and serves a web page for uploading photos at `http://photoframe.local`.
+An ESP32-S3 SuperMini plugs into the frame's USB port. The frame sees a USB
+flash drive backed by a microSD card. The S3 joins your Wi-Fi and serves a web
+page at `http://photoframe.local` where you add photos from a phone or
+computer, and the frame shows them without stopping its slideshow. An iOS
+Shortcut sends photos straight from the iPhone share sheet.
+
 It has been tested with a 2018 NIX digital photo frame.
 
 ## About this project
 
-AI was used heavily to build this project. Most of the firmware changes,
-the web page, the iOS Shortcut and the documentation were written with an AI
-coding assistant, directed by a person and tested on the real frame. The code
-has been through several rounds of AI security review and code review, and the
-fixes from each round are in the code.
+AI was used heavily to build this project. Most of the firmware changes, the
+web page, the iOS Shortcut and the documentation were written with an AI coding
+assistant, directed by a person and tested on the real frame. The code has been
+through several rounds of AI security review and code review, and the fixes
+from each round are in the code.
 
 It is meant for a home network. The device serves plain HTTP with Basic auth,
-and its upload progress WebSocket has no login (see Security below). Do not
-expose it to the internet.
+and its upload progress WebSocket has no login (see [Security](#security)). Do
+not expose it to the internet.
 
-## How it works
+## What you need
 
-- **Firmware:** a fork of [PrintDrop](https://github.com/Kabani-Tech/PrintDrop)
-  (MIT, upstream commit `7544aaa`), a Wi-Fi USB drive for 3D printers. It
-  provides one lock for all SD access, a read-only USB side so the frame cannot
-  write stale FAT data back, Wi-Fi with a setup network as fallback, mDNS, a
-  password on the web UI, and OTA updates. Its license is in
-  `firmware/LICENSE`, and its design notes, written for its own board, are in
-  [upstream's docs](https://github.com/Kabani-Tech/PrintDrop/tree/7544aaa/docs).
-- **Storage:** photos live on the microSD card only, never in the S3's flash.
-- **Refresh:** the drive stays connected while photos upload, so the frame
-  keeps playing. When a batch ends, the S3 withdraws the medium for about
-  2.3 seconds, raises UNIT ATTENTION ("medium may have changed") and presents
-  it again, and the frame picks up the new photos.
-- **Network:** the S3 joins the home Wi-Fi. The `PhotoFrame-Setup` network
-  appears only when no Wi-Fi is saved or joining the saved one fails.
+- An ESP32-S3 SuperMini (4 MB flash).
+- A 3.3 V microSD breakout with pull-ups on the data lines, such as Adafruit
+  4682. Avoid modules with an AMS1117 regulator: they expect 5 V, and on 3.3 V
+  the card gets too little voltage to answer.
+- A microSD card formatted FAT32. Cards over 32 GB ship as exFAT, which the
+  firmware does not read; on a Mac, reformat them with Disk Utility's MS-DOS
+  (FAT) format.
+- Six short wires, and a soldering iron for the S3's header pins.
 
-### Batches
-
-A multi-file upload refreshes the frame once, after the last file. Any number
-of files can go in a batch.
-
-- `POST /api/batch/begin` opens a batch. It stays open until
-  `POST /api/batch/end`, however long the uploads take.
-- The upload page calls begin before its first file and end when its queue is
-  empty. Files added while it uploads join the same batch. The iOS Shortcut in
-  `shortcut/` does the same.
-- If end never arrives, the batch closes after 10 minutes without a write.
-- An upload that stops sending is abandoned after 5 seconds without a byte,
-  and its partial file is deleted.
-- Sending end when no batch is open does nothing.
-- A write made without begin opens a batch that ends 30 seconds after the last
-  write finishes. An upload in progress never counts toward that.
-
-## Hardware
-
-- ESP32-S3 SuperMini with 4 MB flash and 2 MB PSRAM.
-- A 3.3 V-only microSD breakout with pull-ups on the data lines, such as
-  Adafruit 4682. A module with an AMS1117 regulator expects 5 V; on 3.3 V the
-  regulator leaves the card too little voltage to answer.
-- A microSD card formatted FAT32.
-
-### Wiring
-
-The card runs over SPI at 20 MHz.
+## Wiring
 
 | SuperMini | Breakout |
 |---|---|
@@ -74,164 +44,213 @@ The card runs over SPI at 20 MHz.
 | GPIO 6 | SO (MISO) |
 | GPIO 7 | CS |
 
-GPIO 4 to 7 are not strapping pins (on the ESP32-S3 those are 0, 3, 45 and
-46), and none of them is used by USB (19, 20) or the RGB LED (48). Keep the
-wires short, with the clock wire shortest.
+Keep the wires short, with the clock wire shortest. The card runs over SPI at
+20 MHz.
 
-### The card
+## Install
 
-Format the card FAT32. Cards over 32 GB ship as exFAT, which the firmware does
-not mount; reformat them with macOS Disk Utility's MS-DOS (FAT) format.
+### 1. Install the tools
 
-The firmware uses a patched copy of the core's SD library in
-`firmware/lib/SD`. It skips ACMD42 during card start-up, which leaves some
-cards unresponsive until power-cycled. `lib/SD/README.md`
-describes the changes.
+Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html).
+Building the web page image also needs `clang` and `git`.
 
-## Build and flash
-
-The build needs [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)
-and reads its settings from environment variables. `tools/build_secrets.py`
-writes them into a generated header in the build folder, never onto the
-compiler command line. The build fails if a required variable is missing, and
-the firmware has no default passwords. To keep them out of your shell history,
-put them in a `.envrc` for [direnv](https://direnv.net) (Git ignores it) or
-load them from a secret manager.
-
-| Key | Used for |
-|---|---|
-| `PHOTOFRAME_WEB_PASSWORD` | Required. Web UI and OTA login, user `admin` unless changed on the Login tab. Only its SHA-256 is compiled in. A reflash applies a new value unless the password was changed on the device. |
-| `PHOTOFRAME_SETUP_PASSWORD` | Required. WPA2 password of the `PhotoFrame-Setup` network, 8 to 63 printable ASCII characters. |
-| `PHOTOFRAME_WIFI_SSID`, `PHOTOFRAME_WIFI_PASSWORD` | Optional. The home Wi-Fi the device joins when none is saved; leave the password empty for an open network. A network saved from the web page takes priority. |
-| `PHOTOFRAME_TZ` | Optional. POSIX TZ string for file timestamps, such as `PST8PDT,M3.2.0,M11.1.0` or `CET-1CEST,M3.5.0,M10.5.0/3`. Default `UTC0`. |
-
-### Setting up a Mac (optional)
+On a Mac (optional):
 
 ```sh
-# clang and git, which tools/build_ui_image.sh uses to build mklittlefs
+# clang and git
 xcode-select --install
-# PlatformIO Core, and direnv to load the variables above from a .envrc
+# PlatformIO Core, and direnv to load the settings in step 2 from a .envrc
 brew install platformio direnv
 ```
 
-The board shows up as `/dev/cu.usbmodem*`. On Apple Silicon,
-`pio run -t uploadfs` fails because PlatformIO's `mklittlefs` is an Intel-only
-binary, so build the web UI image with `tools/build_ui_image.sh` as below.
+### 2. Choose the settings
 
-### Building
+The build reads these environment variables and stops if a required one is
+missing. The firmware has no default passwords. To keep them out of your shell
+history, put them in a `.envrc` in the repo for [direnv](https://direnv.net)
+(Git ignores it) or load them from a secret manager.
+
+| Variable | |
+|---|---|
+| `PHOTOFRAME_WEB_PASSWORD` | Required. Password for the web page, user `admin`. |
+| `PHOTOFRAME_SETUP_PASSWORD` | Required. Password of the `PhotoFrame-Setup` Wi-Fi network the device opens when it has no Wi-Fi to join. 8 to 63 characters. |
+| `PHOTOFRAME_WIFI_SSID` | Optional. Your Wi-Fi network, so the device joins it on first boot without the setup network. |
+| `PHOTOFRAME_WIFI_PASSWORD` | Optional. Its password. Leave it empty for an open network. |
+| `PHOTOFRAME_TZ` | Optional. Time zone for file dates, as a POSIX TZ string such as `PST8PDT,M3.2.0,M11.1.0` or `CET-1CEST,M3.5.0,M10.5.0/3`. Default `UTC0`. |
+
+### 3. Check the wiring
+
+Plug the S3 into your computer with the card inserted. All commands run from
+the `firmware` folder.
 
 ```sh
 cd firmware
-pio run -e photoframe            # build the firmware
-pio run -e photoframe -t upload  # flash it over USB
-tools/build_ui_image.sh          # pack data/ into .pio/littlefs.bin
-pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 \
-  --port <port> write_flash 0x2B0000 .pio/littlefs.bin  # flash the web UI
+pio run -e photoframe_sd_diag -t upload
+pio device monitor
 ```
 
-`tools/build_ui_image.sh` uses a native build in `.tools/mklittlefs` at the
-repo root, which `tools/build_mklittlefs.sh` builds from source on first use
-(mklittlefs 3.0.0, the release PlatformIO pins).
+Press a key to start the report. It checks each wire and the card, and changes
+nothing on the card. If it reports a problem, see
+[The wiring check reports a problem](#the-wiring-check-reports-a-problem).
 
-### Updating over Wi-Fi
-
-Once a card mounts, the USB port is the drive and there is no serial console.
-Update over Wi-Fi instead, firmware and web UI separately. Each one restarts
-the device.
+### 4. Flash the firmware
 
 ```sh
+tools/build_ui_image.sh
+pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port <port> \
+  write_flash 0x2B0000 .pio/littlefs.bin
+pio run -e photoframe -t upload
+```
+
+The first command builds the web page image. The first time, it also builds
+the `mklittlefs` tool from source into `.tools/`. The second writes the image;
+`pio device list` shows the port (`/dev/cu.usbmodem…` on a Mac). The third
+builds and writes the firmware.
+
+When it finishes, unplug the S3 and plug it back in. Once the firmware finds
+the card, the S3's USB port becomes the drive and no longer accepts commands
+from your computer. To flash it over USB again, hold BOOT while pressing RESET.
+After that, use [updates over Wi-Fi](#updating).
+
+### 5. Connect it to your Wi-Fi
+
+If you set `PHOTOFRAME_WIFI_SSID`, the device joins that network on its own.
+
+Otherwise, join the `PhotoFrame-Setup` network with the setup password and
+open `http://192.168.4.1`. Log in with the web password, go to
+**Settings → Wi-Fi**, choose your network, enter its password and press
+**Save and restart**.
+
+### 6. Plug it into the frame
+
+Plug the S3 into the frame's USB port and set the frame to play from its USB
+drive. Open `http://photoframe.local`, add a photo, and check that it appears
+on the frame.
+
+## Adding photos
+
+Open `http://photoframe.local` on a phone or computer on the same Wi-Fi and
+enter the web password. On the **Add** tab, press **Choose photos**, or drop
+photos onto the page on a computer. Each photo is shrunk to 1920 px on its long
+edge and saved as a JPEG before it is sent. The frame keeps playing while
+photos upload and picks up the new ones once the last upload finishes.
+
+The **Photos** tab lists what is on the card. Select photos there to delete
+them.
+
+To send photos from an iPhone's share sheet, install the Shortcut in
+[`shortcut/`](shortcut/).
+
+If `photoframe.local` does not open, use the device's IP address, which your
+router lists.
+
+## Updating
+
+Firmware and web page updates go over Wi-Fi. Each one restarts the device, and
+the frame sees the drive plugged in again.
+
+```sh
+cd firmware
+pio run -e photoframe
 curl -u "admin:$PHOTOFRAME_WEB_PASSWORD" -F "file=@.pio/build/photoframe/firmware.bin" http://photoframe.local/api/ota
+tools/build_ui_image.sh
 curl -u "admin:$PHOTOFRAME_WEB_PASSWORD" -F "file=@.pio/littlefs.bin" "http://photoframe.local/api/ota?target=ui"
 ```
 
-After an update the new firmware is on probation. It is marked valid once it
-has run for 60 seconds, or before any restart it makes itself. If it resets
-before then, the bootloader boots the previous firmware.
+**Settings → Firmware** in the web page also takes a firmware `.bin`.
 
-Keep the `firmware.elf` of every build you flash, to decode crash backtraces
-later.
+New firmware has to run for 60 seconds before it is kept. If it crashes before
+then, the device goes back to the previous version on its next start.
 
-### Flashing over USB
+Keep a copy of `.pio/build/photoframe/firmware.elf` for each version you
+install. You need the matching one to read a crash report.
 
-With no card inserted, the firmware never starts its own USB device, so the
-chip's serial/JTAG port stays up and esptool can flash it directly. With a
-card inserted, hold BOOT while pressing RESET to enter download mode. After
-flashing, unplug and replug the board, because a reset from esptool leaves it
-in download mode.
+## Troubleshooting
 
-### First setup
+### The slideshow has stopped
 
-1. Flash `photoframe_sd_diag`, open `pio device monitor`, and press a key
-   to start the report. It checks the wiring and the card without changing
-   anything.
-2. Flash `photoframe` and the UI image.
-3. With `PHOTOFRAME_WIFI_SSID` and `PHOTOFRAME_WIFI_PASSWORD` set, the device
-   joins the home Wi-Fi on its own. Without them, join `PhotoFrame-Setup`
-   (password: `PHOTOFRAME_SETUP_PASSWORD`), open `http://192.168.4.1`, and
-   save the home Wi-Fi.
-4. Plug the S3 into the frame, upload a photo from `http://photoframe.local`,
-   and check that it appears once the batch ends.
+Press **Restart slideshow** under **Settings → Frame**. The S3 restarts and the
+frame sees the drive plugged in again. The NIX starts its slideshow when that
+happens.
 
-### Reading the diagnostic
+### The device is not on the Wi-Fi
 
-The diagnostic reads each of the four lines with the chip's pull-down on and
-checks that no two lines are bridged. A line that reads 1 is wired to the
-powered breakout or card, which pull their data lines up. CS reads 0 even when
-connected, because the card's pull-up is weak. A data line that reads 0 is
-not reaching the breakout, so check that wire and its solder joints.
+It retries every minute and restarts after 10 minutes without Wi-Fi. If it
+fell back to the `PhotoFrame-Setup` network while a network is saved, it
+restarts after 10 minutes with nobody connected to try your network again.
 
-If it reports that MISO floats, the card is not driving the line. Check that
-a card is inserted, that the breakout's power pin gets 3.3 V, and that the SO
+To start over, hold BOOT for 5 seconds. That clears the Wi-Fi network and
+login saved on the device, so the values from the build apply again, and
+restarts it.
+
+### The wiring check reports a problem
+
+The check reads each line with the chip's pull-down on. A data line that reads
+0 is not reaching the breakout: check that wire and its solder joints. CS reads
+0 even when connected, which is normal.
+
+If it reports that MISO floats, the card is not driving the line. Check that a
+card is inserted, that the breakout's power pin gets 3.3 V, and that the SO
 wire goes to GPIO 6.
 
-If the card stops answering after a failed mount, unplug the S3 to power-cycle
-the card before running the diagnostic again.
+If the card stops answering after a failed attempt, unplug the S3 to
+power-cycle the card and run the check again.
 
-## Using it
+### Reading logs and crash reports
 
-The web page asks only for the password and takes the username from the
-device. Once on Wi-Fi, the device sets its clock over NTP in the zone set by
-`PHOTOFRAME_TZ`, so uploaded files carry real timestamps.
+- `http://photoframe.local/api/log` (needs the login) shows the last 4 KB of log lines. They
+  survive a crash or watchdog reset.
+- `http://photoframe.local/api/status` shows the firmware version, Wi-Fi,
+  card and USB state, and why the device last restarted.
+- `http://photoframe.local/api/crash` (needs the login) summarises the last crash: task,
+  program counter, backtrace, and the SHA-256 of the firmware that crashed.
+  Turn the addresses into source lines with the `firmware.elf` whose SHA-256
+  matches:
 
-A short press of the BOOT button ends the open batch, or refreshes the frame
-if none is open. Holding it for 5 seconds clears the Wi-Fi network and login
-saved on the device, so the build's values apply again, and restarts it.
-
-### When something goes wrong
-
-- **The slideshow has stopped:** press **Restart slideshow** on the Frame
-  settings tab (`POST /api/restart`). The S3 restarts and the frame sees the
-  drive plugged in again. The NIX starts its slideshow when that happens.
-- **The device is off the home Wi-Fi:** it asks the driver to reconnect every
-  minute and restarts after 10 minutes. If it fell back to `PhotoFrame-Setup`
-  while a home network is saved, it restarts to try again after 10 minutes
-  with nobody on the setup network.
-- **Logs:** `GET /api/log` returns the last 4 KB of log lines. They are kept
-  in RTC memory, which survives a crash or watchdog reset. `/api/status`
-  reports the last reset reason.
-- **Crashes:** `GET /api/crash` summarises the core dump the last panic left:
-  task, PC and backtrace, and the ELF's SHA-256. Decode the addresses with
-  `~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf`,
-  using the ELF whose hash matches.
+  ```sh
+  ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <addresses>
+  ```
 
 ## Security
 
-- Every API call that reads the card, changes it, uploads or changes settings
-  needs the login. The page itself and the status endpoints (`/api/status`,
-  `/api/auth/status`, `/api/ota/status`) do not.
-- Requests whose `Origin` names another site are refused, so a web page
-  elsewhere cannot use a browser's saved login to drive the device.
-- The WebSocket on port 81 (upload progress) has no login. Anyone on the home
-  network who connects receives file names and the status JSON.
-- The web UI is served with `Cache-Control: no-cache`, so a phone loads a
-  reflashed UI on its next visit.
-- `firmware/lib/WebServer` is a patched copy of the core's WebServer that
-  bounds request sizes and waits, so a client cannot hang or crash the device
-  before the login check. `lib/WebServer/README.md` lists the changes.
+- Every action that reads, adds or deletes photos, changes settings or
+  updates firmware needs the login. The page itself and the status endpoints
+  (`/api/status`, `/api/auth/status`, `/api/ota/status`) do not.
+- The login is HTTP Basic auth over plain HTTP, so anyone who can watch your
+  Wi-Fi traffic can read it.
+- The upload progress WebSocket on port 81 has no login. Anyone on your network
+  who connects receives file names and the device status.
+- Requests that another website's page sends are refused, so a page elsewhere
+  cannot use your browser's saved login.
+- The firmware stores only a SHA-256 of the web password.
+
+## How it works
+
+- The frame sees the card as a read-only drive, so it can never write to it
+  while the web page is adding photos.
+- Photos upload while the drive stays connected. When a batch of uploads ends,
+  the S3 withdraws the card for about 2.3 seconds and signals the frame that
+  the medium changed. The frame then reads the card again and finds the new
+  photos without stopping.
+- A batch opens with `POST /api/batch/begin` and ends with
+  `POST /api/batch/end`. The web page and the Shortcut use these, so several
+  photos refresh the frame once. A batch that is never ended closes after
+  10 minutes without an upload. Uploads sent without a batch refresh the frame
+  30 seconds after the last one. An upload that stops sending for 5 seconds is
+  dropped and its partial file deleted.
+- The firmware is a fork of [PrintDrop](https://github.com/Kabani-Tech/PrintDrop)
+  (upstream commit `7544aaa`), a Wi-Fi USB drive for 3D printers. Its design
+  notes, written for its own board, are in
+  [upstream's docs](https://github.com/Kabani-Tech/PrintDrop/tree/7544aaa/docs).
+- `firmware/lib/SD` and `firmware/lib/WebServer` are patched copies of the
+  Arduino-ESP32 libraries. The SD patch skips a start-up command (ACMD42) that
+  left some cards unresponsive until power-cycled. The WebServer patch limits
+  request sizes and waits, so a client cannot hang or crash the device. Each
+  folder's README lists the changes.
 
 ## License
 
-MIT, see `LICENSE`. The firmware is a fork of PrintDrop (MIT, `firmware/LICENSE`).
-`firmware/lib/SD` is Espressif's SD library (Apache-2.0) and
-`firmware/lib/WebServer` is the Arduino-ESP32 WebServer library (LGPL-2.1),
-each with local changes described in its `README.md`.
+MIT, see [`LICENSE`](LICENSE). The firmware is a fork of PrintDrop (MIT,
+[`firmware/LICENSE`](firmware/LICENSE)). `firmware/lib/SD` is Espressif's SD
+library (Apache-2.0) and `firmware/lib/WebServer` is the Arduino-ESP32
+WebServer library (LGPL-2.1).
