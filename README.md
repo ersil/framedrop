@@ -263,7 +263,7 @@ power-cycle the card and run the check again.
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). The firmware is a fork of PrintDrop (MIT,
-[`firmware/LICENSE`](firmware/LICENSE)). `firmware/lib/SD` is Espressif's SD
+MIT, see [`LICENSE`](LICENSE). The upstream firmware's MIT license is in
+[`firmware/LICENSE`](firmware/LICENSE). `firmware/lib/SD` is Espressif's SD
 library (Apache-2.0) and `firmware/lib/WebServer` is the Arduino-ESP32
 WebServer library (LGPL-2.1).
