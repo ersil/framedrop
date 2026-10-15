@@ -84,13 +84,13 @@
 // talked out of it -- it has to be reflashed. 25 MHz does this, and so does
 // 32 MHz, despite 25 MHz being this card's own advertised tr_speed. So the list
 // below is the set measured to actually work on hardware rather than the set
-// that looks reasonable. Add to it from a bench_sdio run, or set
+// that looks reasonable. Add to it from upstream PrintDrop's bench_sdio measurements, or set
 // SDMMC_FREQ_UNCHECKED to take responsibility for a value yourself.
 #if defined(USE_SDIO) && !defined(SDMMC_FREQ_UNCHECKED)
 #if SDMMC_FREQ != 40000000 && SDMMC_FREQ != 20000000 && \
     SDMMC_FREQ != 10000000 && SDMMC_FREQ !=  4000000 && \
     SDMMC_FREQ !=  1000000
-#error "SDMMC_FREQ is not one of the frequencies measured to work (40, 20, 10, 4 or 1 MHz). Others can abort at boot and leave a board that only a reflash recovers; see docs/bugs.md. Define SDMMC_FREQ_UNCHECKED to override."
+#error "SDMMC_FREQ is not one of the frequencies measured to work (40, 20, 10, 4 or 1 MHz). Others can abort at boot and leave a board that only a reflash recovers; see upstream PrintDrop's docs/bugs.md. Define SDMMC_FREQ_UNCHECKED to override."
 #endif
 #endif
 
@@ -149,7 +149,7 @@
 #define USB_DETACH_MS 600
 #endif
 // Whether refreshHostView() re-enumerates rather than relying on the medium
-// cycle. Set from measurement, not taste: see docs/bugs.md.
+// cycle. Set from measurement, not taste: see upstream PrintDrop's docs/bugs.md.
 #ifndef USB_FORCE_REATTACH
 #define USB_FORCE_REATTACH 0
 #endif
@@ -191,7 +191,7 @@
 // Offer the card to the USB host as write-protected. This is the switch that
 // makes sharing safe rather than merely careful: a host that cannot write can
 // neither cache dirty FAT metadata nor flush it back over an upload, which is
-// the corruption measured in docs/bugs.md. The cost is that files can no longer
+// the corruption measured in upstream PrintDrop's docs/bugs.md. The cost is that files can no longer
 // be dragged onto the card over USB -- the web UI becomes the only writer,
 // which for a print-drop box is the intended flow anyway.
 //

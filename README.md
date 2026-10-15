@@ -2,10 +2,10 @@
 
 Wi-Fi photo uploads for a digital photo frame that only reads USB drives.
 
-An ESP32-S3 SuperMini plugged into the USB port of a 2018 NIX digital photo
-frame. The S3 appears to the frame as a read-only USB flash drive backed by a
-microSD card, joins the home Wi-Fi, and serves a web page for uploading photos
-at `http://photoframe.local`.
+An ESP32-S3 SuperMini plugs into the frame's USB port. The frame sees a
+read-only USB flash drive backed by a microSD card, while the S3 joins the home
+Wi-Fi and serves a web page for uploading photos at `http://photoframe.local`.
+It has been tested with a 2018 NIX digital photo frame.
 
 ## About this project
 
@@ -26,14 +26,13 @@ expose it to the internet.
   provides one lock for all SD access, a read-only USB side so the frame cannot
   write stale FAT data back, Wi-Fi with a setup network as fallback, mDNS, a
   password on the web UI, and OTA updates. Its license is in
-  `firmware/LICENSE`.
+  `firmware/LICENSE`, and its design notes, written for its own board, are in
+  [upstream's docs](https://github.com/Kabani-Tech/PrintDrop/tree/7544aaa/docs).
 - **Storage:** photos live on the microSD card only, never in the S3's flash.
 - **Refresh:** the drive stays connected while photos upload, so the frame
   keeps playing. When a batch ends, the S3 withdraws the medium for about
   2.3 seconds, raises UNIT ATTENTION ("medium may have changed") and presents
-  it again, and the frame picks up the new photos. This is
-  `USB_FORCE_REATTACH=0`, the `photoframe` build's setting. With `1`, the S3
-  leaves the USB bus for the whole batch instead.
+  it again, and the frame picks up the new photos.
 - **Network:** the S3 joins the home Wi-Fi. The `PhotoFrame-Setup` network
   appears only when no Wi-Fi is saved or joining the saved one fails.
 
@@ -115,9 +114,10 @@ tools/build_ui_image.sh         # pack data/ into .pio/littlefs.bin
 
 `pio run -t uploadfs` does not work on Apple Silicon, because PlatformIO's
 `mklittlefs` is an Intel-only binary. `tools/build_ui_image.sh` uses a native
-build in `.tools/mklittlefs` at the repo root, which `tools/build_mklittlefs.sh`
-builds from source on first use (mklittlefs 3.0.0, the release PlatformIO pins). Write the image
-to `0x2B0000` with esptool, as the script prints.
+build in `.tools/mklittlefs` at the repo root, which
+`tools/build_mklittlefs.sh` builds from source on first use (mklittlefs 3.0.0,
+the release PlatformIO pins). Write the image to `0x2B0000` with esptool, as
+the script prints.
 
 ### Updating over Wi-Fi
 
@@ -149,8 +149,7 @@ in download mode.
 
 1. Flash `photoframe_sd_diag`, open `pio device monitor`, and press a key
    to start the report. It checks the wiring and the card without changing
-   anything. Pressing `A` also runs the ACMD42 check, which leaves the card
-   unresponsive until it is power-cycled.
+   anything.
 2. Flash `photoframe` and the UI image.
 3. With `PHOTOFRAME_WIFI_SSID` and `PHOTOFRAME_WIFI_PASSWORD` set, the device
    joins the home Wi-Fi on its own. Without them, join `PhotoFrame-Setup`
@@ -187,8 +186,8 @@ saved on the device, so the build's values apply again, and restarts it.
 ### When something goes wrong
 
 - **The slideshow has stopped:** press **Restart slideshow** on the Frame
-  settings tab (`POST /api/restart`). The S3 restarts, the frame sees the drive
-  plugged in again, and the frame starts its slideshow.
+  settings tab (`POST /api/restart`). The S3 restarts and the frame sees the
+  drive plugged in again. The NIX starts its slideshow when that happens.
 - **The device is off the home Wi-Fi:** it asks the driver to reconnect every
   minute and restarts after 10 minutes. If it fell back to `PhotoFrame-Setup`
   while a home network is saved, it restarts to try again after 10 minutes

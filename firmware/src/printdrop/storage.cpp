@@ -428,7 +428,7 @@ void setMedia(bool present) {
 // cached FAT, and macOS demonstrably does not: an uploaded file stayed
 // invisible for as long as the volume stayed mounted, and the host's stale
 // allocation table was later written back over it, losing the file and leaving
-// orphaned clusters behind. See docs/bugs.md.
+// orphaned clusters behind. See upstream PrintDrop's docs/bugs.md.
 //
 // TinyUSB substitutes its default MEDIUM NOT PRESENT only while sense_key is
 // still 0, so setting ours first makes the next *failing* command carry UNIT

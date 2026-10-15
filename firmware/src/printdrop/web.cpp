@@ -497,7 +497,7 @@ void handleDownload() {
     // cluster chain is damaged reads 0 bytes forever, available() never falls,
     // and the loop spins on loopTask -- which takes the web server AND the
     // serial console down until someone power-cycles the board. Reproduced
-    // three times; see docs/bugs.md. Send it ourselves so a failed read ends
+    // three times; see upstream PrintDrop's docs/bugs.md. Send it ourselves so a failed read ends
     // the response instead.
     server.setContentLength(total);
     server.send(200, "application/octet-stream", "");

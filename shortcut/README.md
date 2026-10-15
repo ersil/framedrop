@@ -54,7 +54,6 @@ a failure count added if any upload did not return `"ok":true`.
 
 - The username is `admin`, fixed in the Credentials action. After a username
   change on the Login tab, edit that action or every upload fails with 401.
-
 - The phone must be on the home Wi-Fi (or on a VPN that routes to
   it) and must be able to resolve `photoframe.local` through mDNS. If that
   fails, replace the address in the first Text action with the device's IP.
