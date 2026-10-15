@@ -8,7 +8,8 @@ page at `http://photoframe.local` where you add photos from a phone or
 computer, and the frame shows them without stopping its slideshow. An iOS
 Shortcut sends photos straight from the iPhone share sheet.
 
-It has been tested with a 2018 NIX digital photo frame.
+> [!NOTE]
+> This project was tested with a 2018 NIX digital photo frame model.
 
 ## About this project
 
@@ -60,6 +61,14 @@ On a Mac with [Homebrew](https://brew.sh) (optional):
 brew install platformio
 ```
 
+The scripts in `firmware/tools` need a Unix shell: macOS, Linux, or WSL on
+Windows. Get the code; every command below runs from the `firmware` folder:
+
+```sh
+git clone https://github.com/ersil/framedrop.git
+cd framedrop/firmware
+```
+
 ### 2. Choose the settings
 
 The build reads its settings from environment variables and stops if a
@@ -81,17 +90,18 @@ export PHOTOFRAME_SETUP_PASSWORD='choose-another'
 
 ### 3. Check the wiring
 
-Plug the S3 into your computer with the card inserted. All commands run from
-the `firmware` folder.
+Plug the S3 into your computer with the card inserted, then build and flash
+the wiring check and open its serial output. The first build downloads the
+ESP32 toolchain and takes a few minutes.
 
 ```sh
-cd firmware
 pio run -e photoframe_sd_diag -t upload
 pio device monitor
 ```
 
 Press a key to start the report. It checks each wire and the card, and changes
-nothing on the card. If it reports a problem, see
+nothing on the card. Press Ctrl+C to leave the monitor before step 4, which
+needs the port. If it reports a problem, see
 [The wiring check reports a problem](#the-wiring-check-reports-a-problem).
 
 ### 4. Flash the firmware
@@ -103,10 +113,9 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port <port> \
 pio run -e photoframe -t upload
 ```
 
-The first command builds the web page image. The first time, it also builds
-the `mklittlefs` tool from source into `.tools/`. The second writes the image;
-`pio device list` shows the port (`/dev/cu.usbmodem…` on a Mac). The third
-builds and writes the firmware.
+These build the web page image (the first run also builds the `mklittlefs`
+tool into `.tools/`), write it, then build and write the firmware.
+`pio device list` shows the port (`/dev/cu.usbmodem…` on a Mac).
 
 When it finishes, unplug the S3 and plug it back in. Once the firmware finds
 the card, the S3's USB port becomes the drive and no longer accepts commands
@@ -119,8 +128,8 @@ If you set `PHOTOFRAME_WIFI_SSID`, the device joins that network on its own.
 
 Otherwise, join the `PhotoFrame-Setup` network with the setup password and
 open `http://192.168.4.1`. Log in with the web password, go to
-**Settings → Wi-Fi**, choose your network, enter its password and press
-**Save and restart**.
+**Settings → Wi-Fi**, press **Scan networks**, pick your network, enter its
+password and press **Save and restart**.
 
 ### 6. Plug it into the frame
 
@@ -132,9 +141,10 @@ on the frame.
 
 Open `http://photoframe.local` on a phone or computer on the same Wi-Fi and
 enter the web password. On the **Add** tab, press **Choose photos**, or drop
-photos onto the page on a computer. Each photo is shrunk to 1920 px on its long
-edge and saved as a JPEG before it is sent. The frame keeps playing while
-photos upload and picks up the new ones once the last upload finishes.
+photos onto the page on a computer. Before sending, the page saves each photo
+as a JPEG and shrinks any photo larger than 1920 px on its long edge. The frame
+keeps playing while photos upload and picks up the new ones once the last
+upload finishes.
 
 The **Photos** tab lists what is on the card. Select photos there to delete
 them.
@@ -148,10 +158,11 @@ router lists.
 ## Updating
 
 Firmware and web page updates go over Wi-Fi. Each one restarts the device, and
-the frame sees the drive plugged in again.
+the frame sees the drive plugged in again. Build with the same settings as the
+first install: a different `PHOTOFRAME_WEB_PASSWORD` becomes the new login,
+unless the password was changed in the web page.
 
 ```sh
-cd firmware
 pio run -e photoframe
 curl -u "admin:$PHOTOFRAME_WEB_PASSWORD" -F "file=@.pio/build/photoframe/firmware.bin" http://photoframe.local/api/ota
 tools/build_ui_image.sh
@@ -170,9 +181,9 @@ install. You need the matching one to read a crash report.
 
 ### The slideshow has stopped
 
-Press **Restart slideshow** under **Settings → Frame**. The S3 restarts and the
-frame sees the drive plugged in again. The NIX starts its slideshow when that
-happens.
+Press **Restart slideshow** under **Settings → Frame**. The S3 restarts, the
+frame sees the drive plugged in again, and the tested frame starts its
+slideshow.
 
 ### The device is not on the Wi-Fi
 
@@ -180,7 +191,7 @@ It retries every minute and restarts after 10 minutes without Wi-Fi. If it
 fell back to the `PhotoFrame-Setup` network while a network is saved, it
 restarts after 10 minutes with nobody connected to try your network again.
 
-To start over, hold BOOT for 5 seconds. That clears the Wi-Fi network and
+To start over, hold BOOT for 5 seconds. That clears the Wi-Fi settings and
 login saved on the device, so the values from the build apply again, and
 restarts it.
 
@@ -204,10 +215,10 @@ power-cycle the card and run the check again.
 - `http://photoframe.local/api/status` shows the firmware version, Wi-Fi,
   card and USB state, and why the device last restarted.
 - `http://photoframe.local/api/crash` (needs the login) summarises the last
-  crash: task, program counter, backtrace, and the SHA-256 of the firmware
-  that crashed.
-  Turn the addresses into source lines with the `firmware.elf` whose SHA-256
-  matches:
+  crash: task, program counter, backtrace, and the first 16 characters of the
+  SHA-256 of the firmware's ELF file. Find the matching file with
+  `shasum -a 256 firmware.elf` (`sha256sum` on Linux), then turn the
+  backtrace addresses into source lines:
 
   ```sh
   ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <addresses>
@@ -222,8 +233,8 @@ power-cycle the card and run the check again.
   Wi-Fi traffic can read it.
 - The upload progress WebSocket on port 81 has no login. Anyone on your network
   who connects receives file names and the device status.
-- Requests that another website's page sends are refused, so a page elsewhere
-  cannot use your browser's saved login.
+- Requests from a page on another website are refused, so that page cannot
+  use your browser's saved login.
 - The firmware stores only a SHA-256 of the web password.
 
 ## How it works

@@ -768,7 +768,7 @@
   });
 
   // --- Restart slideshow ---------------------------------------------------------------------------------
-  // A device restart is what reliably starts the NIX slideshow: the frame sees the drive plugged in again.
+  // A device restart is what reliably starts the frame's slideshow: the frame sees the drive plugged in again.
   $('#restartBtn').addEventListener('click', async () => {
     if (uploading || deleting) { toast('Wait for the current upload or delete to finish', 'error'); return; }
     if (!await openModal({ title: 'Restart the photo frame drive?', msg: 'The device restarts and the frame starts its slideshow again. An upload from another phone or the Shortcut would be cut off. The page is unavailable for about 10 seconds.', okText: 'Restart' })) return;

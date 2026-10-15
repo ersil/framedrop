@@ -1036,7 +1036,7 @@ bool begin() {
     server.on("/api/batch/begin", HTTP_POST, handleBatchBegin);
     server.on("/api/batch/end",   HTTP_POST, handleBatchEnd);
     server.on("/api/usb/reattach", HTTP_POST, handleReattach);
-    // Restarting the device is what reliably starts the NIX slideshow: the
+    // Restarting the device is what reliably starts the frame's slideshow: the
     // frame sees the drive plugged in again. The page's Restart slideshow
     // button posts here.
     server.on("/api/restart", HTTP_POST, []() {
