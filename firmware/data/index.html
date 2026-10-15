@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+<title>Photo Frame</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-photos" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M3 17l5-5 4 4 3-3 6 6"/></symbol>
+  <symbol id="i-add" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="wrap top__in">
+    <h1 class="brand">Photo Frame <span class="ver" id="versionBadge"></span></h1>
+    <button id="themeToggle" class="icon-btn" type="button" aria-label="Toggle dark mode"><svg class="ico"><use href="#i-theme"/></svg></button>
+  </div>
+  <div class="wrap">
+    <div class="statusline" id="statusLine" aria-live="polite">
+      <span class="chip" id="chipWifi"><i></i><span>Connecting…</span></span>
+      <span class="chip" id="chipCard"><i></i><span>Card</span></span>
+      <span class="chip" id="chipFrame"><i></i><span>Frame</span></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="activity" class="activity hidden" role="status" aria-live="polite">
+    <div class="activity__text"><strong id="activityTitle"></strong><span id="activitySub"></span></div>
+    <div class="track"><i id="activityBar"></i></div>
+  </div>
+</div>
+
+<nav class="tabbar" aria-label="Main">
+  <button class="tab is-active" data-view="photos" type="button"><svg class="ico"><use href="#i-photos"/></svg><span>Photos</span></button>
+  <button class="tab" data-view="add" type="button"><svg class="ico"><use href="#i-add"/></svg><span>Add</span></button>
+  <button class="tab" data-view="settings" type="button"><svg class="ico"><use href="#i-gear"/></svg><span>Settings</span></button>
+</nav>
+
+<main class="wrap main" id="main">
+
+  <!-- PHOTOS -->
+  <section id="view-photos" class="view is-active" aria-label="Photos">
+    <div class="bar">
+      <nav class="crumbs" aria-label="Folder"><ol id="crumbs"></ol></nav>
+      <div class="bar__actions">
+        <button id="selectBtn" class="btn" type="button">Select</button>
+        <button id="mkdirBtn" class="btn btn--ghost" type="button">New folder</button>
+      </div>
+    </div>
+    <div id="selbar" class="selbar hidden">
+      <span id="selCount">0 selected</span>
+      <span class="grow"></span>
+      <button id="selAll" class="btn btn--ghost" type="button">All</button>
+      <button id="delBtn" class="btn btn--danger" type="button" disabled>Delete</button>
+      <button id="selDone" class="btn" type="button">Done</button>
+    </div>
+    <p id="loadErr" class="notice notice--err hidden"><span id="loadErrText"></span> <button id="retryBtn" class="btn" type="button">Retry</button></p>
+    <div id="empty" class="empty hidden">
+      <p><strong>No photos here yet.</strong></p>
+      <p class="muted">Photos you add show up on the frame a few seconds after the upload finishes.</p>
+      <button class="btn btn--primary" type="button" data-jump="add">Add photos</button>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+
+  <!-- ADD -->
+  <section id="view-add" class="view" aria-label="Add photos">
+    <div class="card pick">
+      <h2>Add photos</h2>
+      <p class="muted">Each photo is shrunk to 1920 px on its long edge and saved as a JPEG before it is sent. Several photos go in as one batch, and the frame refreshes once when the last one is done.</p>
+      <label class="btn btn--primary btn--lg" id="pickLabel"><input id="fileInput" type="file" accept="image/*" multiple hidden>Choose photos</label>
+      <p class="muted small">Saving to <code id="destLabel">/</code>. On a computer you can also drop photos onto this page.</p>
+    </div>
+    <div class="queue-head"><h2>Queue</h2><button id="clearDone" class="btn btn--ghost" type="button">Clear finished</button></div>
+    <p id="addSummary" class="notice hidden"></p>
+    <div id="queue" class="queue"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="view-settings" class="view" aria-label="Settings">
+    <div class="subtabs" role="tablist" aria-label="Settings sections">
+      <button class="subtab is-active" role="tab" data-tab="frame" type="button">Frame</button>
+      <button class="subtab" role="tab" data-tab="wifi" type="button">Wi-Fi</button>
+      <button class="subtab" role="tab" data-tab="auth" type="button">Login</button>
+      <button class="subtab" role="tab" data-tab="ota" type="button">Firmware</button>
+      <button class="subtab" role="tab" data-tab="about" type="button">About</button>
+    </div>
+
+    <div id="tab-frame" class="tabpanel is-active card" role="tabpanel">
+      <h2>Frame connection</h2>
+      <p id="usbMsg" class="usbmsg">Checking…</p>
+      <p class="muted small">The drive stays connected while photos upload, so the slideshow keeps playing. When a batch ends, the frame is told the card changed and picks up the new photos.</p>
+      <div class="row">
+        <button id="restartBtn" class="btn btn--primary" type="button">Restart slideshow</button>
+      </div>
+      <p class="muted small">If the slideshow has stopped, this restarts the device. The frame sees the drive plugged in again and starts playing. It takes about 10 seconds.</p>
+    </div>
+
+    <div id="tab-wifi" class="tabpanel card" role="tabpanel">
+      <h2>Wi-Fi</h2>
+      <p class="muted small">Saving restarts the frame adapter, and it rejoins on the new network. This page is then at <code id="discInfo">photoframe.local</code>.</p>
+      <div class="row">
+        <button id="scanBtn" class="btn" type="button">Scan networks</button>
+        <span id="scanStatus" class="muted small" aria-live="polite"></span>
+      </div>
+      <div id="scanList" class="scanlist"></div>
+      <form id="wifiForm" class="form">
+        <label>Network name (SSID)<input name="ssid" id="wifiSsid" required autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+        <label>Password<input name="password" id="wifiPass" type="password" autocomplete="new-password"></label>
+        <label>Hostname<input name="hostname" id="wifiHost" placeholder="photoframe" pattern="[a-zA-Z0-9\-]+" autocapitalize="none"></label>
+        <label class="check"><input type="checkbox" id="useStatic"> Use a static IP</label>
+        <div id="staticFields" class="two hidden">
+          <label>IP<input name="ip" placeholder="192.168.1.50" inputmode="decimal"></label>
+          <label>Gateway<input name="gw" placeholder="192.168.1.1" inputmode="decimal"></label>
+          <label>Subnet mask<input name="mask" placeholder="255.255.255.0" inputmode="decimal"></label>
+          <label>DNS<input name="dns" placeholder="1.1.1.1" inputmode="decimal"></label>
+        </div>
+        <button class="btn btn--primary" type="submit">Save and restart</button>
+      </form>
+    </div>
+
+    <div id="tab-auth" class="tabpanel card" role="tabpanel">
+      <h2>Web login</h2>
+      <p class="muted small">Viewing, uploading and deleting photos, settings and updates need this login. The page itself and the status line are open to anyone on the home network. The device keeps only a SHA-256 hash of the password.</p>
+      <form id="authForm" class="form">
+        <label>Username<input name="user" id="authUser" autocomplete="username" autocapitalize="none"></label>
+        <label>New password<input name="pass" id="authPass" type="password" autocomplete="new-password"></label>
+        <label>Confirm password<input id="authPass2" type="password" autocomplete="new-password"></label>
+        <div class="row"><button class="btn btn--primary" type="submit">Save login</button><span id="authStatus" class="muted small"></span></div>
+      </form>
+    </div>
+
+    <div id="tab-ota" class="tabpanel card" role="tabpanel">
+      <h2>Firmware update</h2>
+      <p class="muted small">Current version <code id="otaCurrent">-</code> <span id="otaEnabledBadge"></span></p>
+      <div id="otaSDBox" class="notice hidden">
+        <strong>Update on the SD card: <span id="otaSDVer"></span></strong>
+        <div><button id="otaSDTrigger" class="btn btn--primary" type="button">Update from SD</button></div>
+      </div>
+      <label class="btn" id="otaLabel"><input id="otaFile" type="file" accept=".bin" hidden>Choose firmware .bin</label>
+      <span id="otaFileName" class="muted small"></span>
+      <div id="otaProgress" class="track hidden"><i id="otaBar"></i></div>
+      <p class="muted small">The frame restarts after the update. Alternatively, put <code>firmware.bin</code> and <code>firmware.json</code> in the card root and reload this page.</p>
+    </div>
+
+    <div id="tab-about" class="tabpanel card" role="tabpanel">
+      <h2>About</h2>
+      <p>An ESP32-S3 plugged into the frame's USB port. To the frame it looks like a USB drive backed by a microSD card; over Wi-Fi it serves this page.</p>
+      <dl class="kv">
+        <dt>Version</dt><dd id="aboutVersion">-</dd>
+        <dt>Hostname</dt><dd id="kvHostname">-</dd>
+        <dt>IP address</dt><dd id="kvIp">-</dd>
+        <dt>Wi-Fi</dt><dd id="kvSsid">-</dd>
+        <dt>Signal</dt><dd id="kvRssi">-</dd>
+        <dt>Mode</dt><dd id="kvMode">-</dd>
+        <dt>Card</dt><dd id="kvCard">-</dd>
+        <dt>Uptime</dt><dd id="kvUptime">-</dd>
+      </dl>
+      <p class="muted small">Firmware based on PrintDrop by Kabani Tech (MIT license).</p>
+    </div>
+  </section>
+</main>
+
+<div id="viewer" class="viewer hidden" role="dialog" aria-modal="true" aria-label="Photo">
+  <div class="viewer__bar">
+    <span id="viewerName" class="viewer__name"></span>
+    <button id="viewerDl" class="btn" type="button">Download</button>
+    <button id="viewerDel" class="btn btn--danger" type="button">Delete</button>
+    <button id="viewerClose" class="btn" type="button">Close</button>
+  </div>
+  <div class="viewer__stage">
+    <button id="viewerPrev" class="viewer__nav viewer__nav--prev" type="button" aria-label="Previous photo">&lsaquo;</button>
+    <img id="viewerImg" alt="">
+    <span id="viewerWait" class="viewer__wait">Loading…</span>
+    <button id="viewerNext" class="viewer__nav viewer__nav--next" type="button" aria-label="Next photo">&rsaquo;</button>
+  </div>
+</div>
+
+<div id="dropOverlay" class="dropov hidden" aria-hidden="true"><div>Drop photos to add them</div></div>
+<div id="toastWrap" class="toasts" aria-live="polite"></div>
+
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal__bg" id="modalBg"></div>
+  <div class="modal__box">
+    <h2 id="modalTitle"></h2>
+    <p id="modalMsg" class="muted"></p>
+    <label id="modalInputWrap" class="hidden"><input id="modalInput" type="text" autocapitalize="none" autocomplete="off"></label>
+    <div class="row row--end">
+      <button id="modalCancel" class="btn btn--ghost" type="button">Cancel</button>
+      <button id="modalOk" class="btn btn--primary" type="button">OK</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

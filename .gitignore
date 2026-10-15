@@ -1,0 +1,8 @@
+.DS_Store
+.tools/
+.envrc
+.direnv/
+.cache/
+build/
+disk/*.img
+compile_commands.json

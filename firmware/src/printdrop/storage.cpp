@@ -1,0 +1,806 @@
+#include "storage.h"
+
+#include <USB.h>
+#include <USBMSC.h>
+#include <esp32-hal-tinyusb.h>   // TUSB_CLASS_* — not pulled in by USB.h
+#ifdef USE_SDIO
+#include <SD_MMC.h>
+#include "sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
+// ---------------------------------------------------------------------------
+// SD_MMC Arduino 2.0.x does not expose raw block access or geometry.
+// The underlying sdmmc_card_t is kept in the protected _card member,
+// so we expose it via a minimal subclass hack. This avoids forking the
+// library and stays compatible with future core updates that may add a
+// public card() accessor.
+class SDMMCHack : public fs::SDMMCFS {
+public:
+    sdmmc_card_t* getCard() { return _card; }
+};
+#define SD_MMC_CARD (reinterpret_cast<SDMMCHack*>(&SD_MMC)->getCard())
+// One SDMMC command per call, however many sectors. Issuing a command per
+// 512-byte sector costs ~10x: measured 1.6 MB/s single-sector vs 16 MB/s at
+// 32 KB per command on the same bus. The IDF bounces the buffer internally if
+// it is not DMA-capable or word-aligned, so callers need not pre-align.
+inline bool sdioReadRAW(uint8_t* buf, uint32_t sector, uint32_t count = 1) {
+    sdmmc_card_t* c = SD_MMC_CARD;
+    if (!c) return false;
+    return sdmmc_read_sectors(c, buf, sector, count) == ESP_OK;
+}
+inline bool sdioWriteRAW(uint8_t* buf, uint32_t sector, uint32_t count = 1) {
+    sdmmc_card_t* c = SD_MMC_CARD;
+    if (!c) return false;
+    return sdmmc_write_sectors(c, buf, sector, count) == ESP_OK;
+}
+#else
+#include <SPI.h>
+#include <SD.h>
+#endif
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+#include <esp_log.h>
+
+#include "config.h"
+#include "logbuf.h"
+#include "led.h"
+
+namespace storage {
+namespace {
+
+USBMSC      msc;
+#ifdef USE_SDIO
+// SDIO uses the ESP32-S3 SDMMC host — no SPIClass needed.
+#else
+SPIClass    sdSPI;
+#endif
+SemaphoreHandle_t sdMutex = nullptr;
+
+bool     mounted        = false;
+uint32_t secSize        = 0;
+uint32_t secCount       = 0;
+uint32_t activeFreq     = 0;
+uint32_t activeWidth    = 0;
+
+volatile bool hostWrote      = false;   // host changed sectors under our FATFS
+volatile bool hostAttached   = false;
+volatile bool mediaOffered   = false;
+bool          usbStarted     = false;   // USB.begin() actually ran
+
+// The card is not reliably present. It can fail to answer at boot, and it can
+// stop answering later — measured repeatedly on this hardware, always
+// sdmmc_send_cmd timing out (0x107) with the wiring untouched. Neither case
+// used to recover without a power cycle, and status kept reporting "mounted"
+// while every single read failed. Count failures, give up on the mount when
+// they pile up, and keep retrying so the board heals itself when the card
+// comes back.
+volatile uint32_t consecutiveErrors = 0;
+volatile bool     busFaulted        = false;
+uint32_t          lastMountAttempt  = 0;
+uint32_t          retryDelayMs      = SD_REMOUNT_INTERVAL_MS;
+
+// How many nested write-locks have withdrawn the media, so the outermost one
+// restores it.
+int  mediaWithdrawnDepth = 0;
+
+// Write batching. While batchOpen is set, the host is not told about writes:
+// with USB_FORCE_REATTACH the device is off the USB bus, and without it the
+// medium stays presented and unchanged as far as the host knows. poll() closes
+// the batch after USB_BATCH_QUIET_MS without a write, or as soon as
+// endBatchNow() sets batchEndRequested, and only then tells the host once.
+volatile bool     batchOpen     = false;
+volatile bool     batchHeld         = false;   // explicit batch: wait for end
+volatile bool     batchEndRequested = false;
+volatile uint32_t batchStartedAt    = 0;
+volatile uint32_t batchLastWrite    = 0;
+
+// Set while poll() is retrying quietly: the mount ladder is five rungs of
+// failure messages, and at one attempt every few seconds it would bury every
+// other line on the console.
+bool quietMount = false;
+
+void logStep(const char* fmt, ...);
+
+void log(const char* fmt, ...) {
+    char buf[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Serial.println(buf);
+    logbuf::add(buf);
+}
+
+void logStep(const char* fmt, ...) {
+    if (quietMount) return;
+    char buf[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Serial.println(buf);
+    logbuf::add(buf);
+}
+
+// --- SD mounting -----------------------------------------------------------
+
+#ifdef USE_SDIO
+
+// SDIO 4-bit via the SDMMC host. The driver handles the 400 kHz
+// identification internally, so we only validate the link at each frequency
+// step and keep the fastest that survives a probe read.
+// `quick` tries only the top rung. The full ladder takes about 4.5 seconds of
+// timeouts to walk, and poll() runs on loopTask -- so retrying with it would
+// make every HTTP request wait that long, exactly when someone is trying to
+// use the web UI to find out why there is no card.
+bool mountCard(bool quick = false) {
+    const bool mode1bit = (SDMMC_WIDTH == 1);
+    SD_MMC.setPins(SDMMC_CLK_PIN, SDMMC_CMD_PIN, SDMMC_D0_PIN,
+                   mode1bit ? -1 : SDMMC_D1_PIN,
+                   mode1bit ? -1 : SDMMC_D2_PIN,
+                   mode1bit ? -1 : SDMMC_D3_PIN);
+
+    // Ladder in kHz (SD_MMC API takes kHz). 40 MHz is SDHC high-speed max;
+    // 20 MHz is conservative on jumper wiring and still ~4x SPI.
+    const uint32_t ladderKhz[] = {
+        SDMMC_FREQ / 1000,
+        20000,
+        10000,
+        4000,
+        1000,
+    };
+
+    const size_t rungs = quick ? 1 : (sizeof(ladderKhz) / sizeof(ladderKhz[0]));
+    for (size_t i = 0; i < rungs; ++i) {
+        const uint32_t fKhz = ladderKhz[i];
+        if (SD_MMC.begin("/sdcard", mode1bit, false, fKhz, 5)) {
+            // Verify before trusting: a marginal clock mounts but serves corrupt
+            // sectors. Use the raw sdmmc path — SD_MMC Arduino 2.0.x has no
+            // readRAW/sectorSize/numSectors.
+            uint8_t probe[512];
+            if (sdioReadRAW(probe, 0) && probe[510] == 0x55 && probe[511] == 0xAA) {
+                sdmmc_card_t* c = SD_MMC_CARD;
+                activeFreq  = fKhz * 1000;
+                activeWidth = mode1bit ? 1 : 4;
+                secSize     = c ? (uint32_t)c->csd.sector_size : 512;
+                secCount    = c ? (uint32_t)c->csd.capacity : (uint32_t)(SD_MMC.cardSize() / secSize);
+                log("[sd] SDIO %u-bit mounted at %u Hz, %u sectors x %u bytes",
+                    activeWidth, activeFreq, secCount, secSize);
+                return true;
+            }
+            logStep("[sd] SDIO %u-bit %u kHz mounted but probe failed, stepping down",
+                mode1bit ? 1 : 4, fKhz);
+            SD_MMC.end();
+        } else {
+            logStep("[sd] SDIO %u-bit %u kHz mount failed, stepping down",
+                mode1bit ? 1 : 4, fKhz);
+        }
+        delay(200);
+    }
+
+    logStep("[sd] SDIO mount failed at all frequencies");
+    return false;
+}
+
+void endBus() {
+    SD_MMC.end();
+}
+
+#else  // SPI
+
+// The SD specification requires identification at <=400 kHz; only afterwards
+// may the clock rise. SD.begin() runs that sequence at whatever frequency it is
+// handed, so a cold card must be mounted slowly first.
+// See the SDIO note: `quick` keeps poll()'s retry off loopTask for seconds at
+// a time.
+bool mountCard(bool quick = false) {
+    sdSPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+
+    bool identified = false;
+    const int tries = quick ? 1 : 5;
+    for (int attempt = 1; attempt <= tries && !identified; ++attempt) {
+        if (SD.begin(SD_CS_PIN, sdSPI, 400000)) {
+            identified = true;
+            break;
+        }
+        SD.end();
+        delay(400);
+    }
+    if (!identified) {
+        logStep("[sd] identification failed at 400 kHz");
+        return false;
+    }
+
+    const uint32_t ladder[] = {SD_SPI_FREQ, 10000000, 4000000, 1000000};
+    const size_t rungs = quick ? 1 : (sizeof(ladder) / sizeof(ladder[0]));
+    for (size_t i = 0; i < rungs; ++i) {
+        const uint32_t f = ladder[i];
+        SD.end();
+        if (!SD.begin(SD_CS_PIN, sdSPI, f)) continue;
+        // Verify before trusting: a marginal clock mounts fine and then serves
+        // corrupt sectors.
+        uint8_t probe[512];
+        if (SD.readRAW(probe, 0) && probe[510] == 0x55 && probe[511] == 0xAA) {
+            activeFreq = f;
+            activeWidth = 1;
+            secSize    = SD.sectorSize();
+            secCount   = SD.numSectors();
+            log("[sd] SPI mounted at %u Hz, %u sectors x %u bytes", f, secCount, secSize);
+            return true;
+        }
+    }
+
+    SD.end();
+    if (SD.begin(SD_CS_PIN, sdSPI, 400000)) {
+        activeFreq = 400000;
+        activeWidth = 1;
+        secSize    = SD.sectorSize();
+        secCount   = SD.numSectors();
+        log("[sd] SPI fell back to 400 kHz");
+        return true;
+    }
+    return false;
+}
+
+void endBus() {
+    SD.end();
+    sdSPI.end();
+}
+
+#endif
+
+// Re-read the filesystem if the USB host has changed it underneath us.
+void refreshMountIfStale() {
+    if (!hostWrote) return;
+    hostWrote = false;
+    log("[sd] host wrote sectors, remounting FATFS");
+#ifdef USE_SDIO
+    SD_MMC.end();
+#else
+    SD.end();
+    sdSPI.end();
+#endif
+    mounted = mountCard();
+}
+
+// --- Write protection ------------------------------------------------------
+
+#if USB_READ_ONLY
+// TinyUSB declares this weak and the Arduino core never defines it, so this is
+// the entire write-protect switch. MODE SENSE then reports the medium as
+// protected, which makes hosts mount the volume read-only and stop writing
+// metadata to it, and any WRITE10 that arrives regardless is refused with
+// DATA PROTECT 7/27/00.
+//
+// This is not caution for its own sake. A host that writes caches FAT metadata
+// the device has no way to invalidate, and writes it back later over whatever
+// the ESP32 has changed in the meantime: measured against macOS, an uploaded
+// file vanished and 51 orphaned clusters were left behind, and one upload read
+// back at the right size with the wrong contents. Withdrawing the medium is a
+// hint a host may ignore. Write protection is not.
+extern "C" bool tud_msc_is_writable_cb(uint8_t lun) {
+    (void)lun;
+    return false;
+}
+#endif
+
+// Called from the MSC callbacks, so it must stay cheap and do no recovery work
+// of its own: the TinyUSB task only raises the flag, and poll() acts on it.
+inline void noteTransfer(bool ok) {
+    if (ok) { consecutiveErrors = 0; return; }
+    if (++consecutiveErrors >= SD_FAULT_THRESHOLD) busFaulted = true;
+}
+
+// --- USB MSC callbacks -----------------------------------------------------
+// These run on the TinyUSB task. They must never block for long, so they take
+// the mutex with a short timeout and fail the transfer rather than stall USB.
+
+const uint32_t kMscLockTimeoutMs = 2000;
+
+int32_t onRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
+    if (!mounted || secSize == 0) return -1;
+    if (offset != 0 || (bufsize % secSize) != 0) return -1;
+    const uint32_t count = bufsize / secSize;
+    if ((uint64_t)lba + count > secCount) return -1;
+
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(kMscLockTimeoutMs)) != pdTRUE) return -1;
+    // mounted was checked without the lock; poll() may have dropped the card
+    // while this callback waited. SD.readRAW/writeRAW after SD.end() index
+    // s_cards[0xFF], far past the two-entry array.
+    if (!mounted) { xSemaphoreGive(sdMutex); return -1; }
+    led::setActivity(true);
+    int32_t result = bufsize;
+#ifdef USE_SDIO
+    // The host asks for up to CONFIG_TINYUSB_MSC_BUFSIZE (4 KB = 8 sectors) at
+    // a time; serve it with a single command.
+    if (!sdioReadRAW(reinterpret_cast<uint8_t*>(buffer), lba, count)) {
+        result = -1;
+    }
+    noteTransfer(result >= 0);
+#else
+    // SDFS exposes only single-sector access, so the SPI path keeps the loop.
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!SD.readRAW(reinterpret_cast<uint8_t*>(buffer) + i * secSize, lba + i)) {
+            result = -1;
+            break;
+        }
+    }
+    noteTransfer(result >= 0);
+#endif
+    led::setActivity(false);
+    xSemaphoreGive(sdMutex);
+    return result;
+}
+
+int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
+    if (!mounted || secSize == 0) return -1;
+    if (offset != 0 || (bufsize % secSize) != 0) return -1;
+    const uint32_t count = bufsize / secSize;
+    if ((uint64_t)lba + count > secCount) return -1;
+
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(kMscLockTimeoutMs)) != pdTRUE) return -1;
+    // mounted was checked without the lock; poll() may have dropped the card
+    // while this callback waited. SD.readRAW/writeRAW after SD.end() index
+    // s_cards[0xFF], far past the two-entry array.
+    if (!mounted) { xSemaphoreGive(sdMutex); return -1; }
+    led::setActivity(true);
+    int32_t result = bufsize;
+#ifdef USE_SDIO
+    // One multi-sector write is also one card program cycle, rather than `count`
+    // of them -- this matters more on writes than on reads.
+    if (!sdioWriteRAW(buffer, lba, count)) {
+        result = -1;
+    }
+    noteTransfer(result >= 0);
+#else
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!SD.writeRAW(buffer + i * secSize, lba + i)) {
+            result = -1;
+            break;
+        }
+    }
+    noteTransfer(result >= 0);
+#endif
+    // Our cached FATFS view is now suspect regardless of success.
+    hostWrote = true;
+    led::setActivity(false);
+    xSemaphoreGive(sdMutex);
+    return result;
+}
+
+// The USB callbacks run on small task stacks: the Arduino USB event task has
+// 2 KB, and log() (a 192-byte buffer, vsnprintf, Serial and the log ring)
+// overflowed it. The overflow panicked the board right after USB started,
+// whenever a host enumerated it quickly, which after a software restart the
+// frame always does. The callbacks only set bits here; poll() logs them on
+// loopTask.
+enum : uint32_t {
+    kEvAttached = 1u << 0,
+    kEvGone     = 1u << 1,
+    kEvSuspend  = 1u << 2,
+    kEvResume   = 1u << 3,
+    kEvEjected  = 1u << 4,
+};
+volatile uint32_t usbEventBits = 0;
+
+void noteUsbEvent(uint32_t bit) {
+    __atomic_fetch_or(&usbEventBits, bit, __ATOMIC_RELAXED);
+}
+
+void logUsbEvents() {
+    const uint32_t ev = __atomic_exchange_n(&usbEventBits, 0u, __ATOMIC_RELAXED);
+    if (ev & kEvAttached) log("[usb] host attached");
+    if (ev & kEvGone)     log("[usb] host gone");
+    if (ev & kEvSuspend)  log("[usb] suspended");
+    if (ev & kEvResume)   log("[usb] resumed");
+    if (ev & kEvEjected)  log("[usb] host ejected the media");
+}
+
+bool onStartStop(uint8_t power_condition, bool start, bool load_eject) {
+    if (load_eject && !start) noteUsbEvent(kEvEjected);
+    return true;
+}
+
+void onUsbEvent(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    if (base != ARDUINO_USB_EVENTS) return;
+    switch (id) {
+        case ARDUINO_USB_STARTED_EVENT: hostAttached = true;  noteUsbEvent(kEvAttached); break;
+        case ARDUINO_USB_STOPPED_EVENT: hostAttached = false; noteUsbEvent(kEvGone);     break;
+        case ARDUINO_USB_SUSPEND_EVENT: hostAttached = false; noteUsbEvent(kEvSuspend);  break;
+        case ARDUINO_USB_RESUME_EVENT:  hostAttached = true;  noteUsbEvent(kEvResume);   break;
+        default: break;
+    }
+}
+
+void setMedia(bool present) {
+    // Never offer a medium with no card behind it: the host would see a drive
+    // whose every read fails, instead of "no medium".
+    if (present && !mounted) present = false;
+    if (mediaOffered == present) return;
+    mediaOffered = present;
+    msc.mediaPresent(present);
+}
+
+// Withdrawing the media reports MEDIUM NOT PRESENT (2/3A/00) correctly, but
+// nothing in TinyUSB 0.16 ever raises UNIT ATTENTION 28h/00 -- "not ready to
+// ready transition, medium may have changed" -- when it comes back. A host that
+// kept the volume mounted therefore has no protocol-level reason to drop its
+// cached FAT, and macOS demonstrably does not: an uploaded file stayed
+// invisible for as long as the volume stayed mounted, and the host's stale
+// allocation table was later written back over it, losing the file and leaving
+// orphaned clusters behind. See docs/bugs.md.
+//
+// TinyUSB substitutes its default MEDIUM NOT PRESENT only while sense_key is
+// still 0, so setting ours first makes the next *failing* command carry UNIT
+// ATTENTION instead. It therefore has to be set while the medium is still
+// withdrawn, and the host needs a poll in that window to collect it.
+void signalMediaChanged() {
+    tud_msc_set_sense(0, SCSI_SENSE_UNIT_ATTENTION, 0x28, 0x00);
+}
+
+// The hammer, for when UNIT ATTENTION is not honoured: drop off the bus
+// entirely. A host cannot hold a cache for a device that is not there, and it
+// is also the only way back after a host has ejected the LUN -- macOS keeps
+// ejecting it otherwise, and not even a firmware reboot brings it back.
+void reattachUsb() {
+    // Whatever happens next, no batch is open afterwards.
+    batchHeld = false;
+    batchEndRequested = false;
+    // begin() bails out before USB.begin() when no card mounts, and TinyUSB is
+    // not safe to poke at before it is initialised. A board sitting there with
+    // no card must not be crashable from an HTTP request.
+    if (!usbStarted) {
+        log("[usb] reattach ignored: USB was never started (no card at boot)");
+        return;
+    }
+    log("[usb] detaching to force the host to rediscover the drive");
+    tud_disconnect();
+    delay(USB_DETACH_MS);
+    tud_connect();
+    // Reconnecting ends any open batch; the host now sees the current card.
+    batchOpen = false;
+    batchHeld = false;
+    batchEndRequested = false;
+}
+
+// Called with sdMutex held, at the start of every write. The first write of a
+// batch leaves the bus; later ones only move the quiet-period deadline.
+void noteBatchWrite() {
+    batchLastWrite = millis();
+    if (batchOpen || !usbStarted) return;
+#if USB_FORCE_REATTACH
+    log("[usb] write batch started: leaving the bus until writes stop");
+    tud_disconnect();
+#else
+    log("[usb] write batch started: the host is told once it ends");
+#endif
+    batchOpen = true;
+    batchHeld = false;          // implicit until beginBatch() says otherwise
+    batchEndRequested = false;
+    batchStartedAt = batchLastWrite;
+}
+
+}  // namespace
+
+// --- Public API ------------------------------------------------------------
+
+static void startUsb();
+
+bool begin() {
+    sdMutex = xSemaphoreCreateMutex();
+    if (!sdMutex) return false;
+
+    mounted = mountCard();
+    if (!mounted) return false;
+    if (secSize == 0 || secCount == 0) {
+        // Drop the mount so poll() keeps retrying, rather than leaving a
+        // "mounted" card that USB never starts for.
+        log("[sd] card reports zero geometry");
+        endBus();
+        mounted = false;
+        return false;
+    }
+
+    startUsb();
+    return true;
+}
+
+static void startUsb() {
+    if (usbStarted) return;
+
+    USB.onEvent(onUsbEvent);
+
+    USB.VID(0x303A);
+    USB.PID(0x4003);
+    USB.productName(PRINTDROP_NAME);
+    USB.manufacturerName("Kabani Tech");
+    // Single-function device: let the host classify from the interface
+    // descriptor rather than announcing an IAD composite it is not.
+    USB.usbClass(TUSB_CLASS_UNSPECIFIED);
+    USB.usbSubClass(0);
+    USB.usbProtocol(0);
+
+    msc.vendorID("PrntDrop");
+    msc.productID("SD Card");
+    msc.productRevision("1.0");
+    msc.onRead(onRead);
+    msc.onWrite(onWrite);
+    msc.onStartStop(onStartStop);
+    msc.mediaPresent(true);
+    mediaOffered = true;
+    msc.begin(secCount, secSize);
+
+    USB.begin();
+    usbStarted = true;
+    log("[usb] mass storage started (%s %u-bit @ %u Hz, %s)", busMode(), busWidth(),
+        busFrequency(), USB_READ_ONLY ? "write-protected" : "read-write");
+}
+
+bool     cardMounted()    { return mounted; }
+uint32_t sectorCount()    { return secCount; }
+uint32_t sectorSize()     { return secSize; }
+uint32_t spiFrequency()   { return activeFreq; }
+uint32_t busFrequency()   { return activeFreq; }
+uint32_t busWidth()       { return activeWidth; }
+const char* busMode() {
+#ifdef USE_SDIO
+    return (SDMMC_WIDTH == 1) ? "sdio-1bit" : "sdio-4bit";
+#else
+    return "spi";
+#endif
+}
+bool     usbHostPresent() { return hostAttached; }
+bool     usbMediaPresent(){ return mediaOffered; }
+
+uint64_t totalBytes() {
+    Guard g(false, 3000);
+    if (!g.ok()) return 0;
+#ifdef USE_SDIO
+    return SD_MMC.totalBytes();
+#else
+    return SD.totalBytes();
+#endif
+}
+uint64_t usedBytes() {
+    Guard g(false, 3000);
+    if (!g.ok()) return 0;
+#ifdef USE_SDIO
+    return SD_MMC.usedBytes();
+#else
+    return SD.usedBytes();
+#endif
+}
+uint64_t freeBytes() {
+    Guard g(false, 3000);
+    if (!g.ok()) return 0;
+#ifdef USE_SDIO
+    const uint64_t total = SD_MMC.totalBytes();
+    const uint64_t used  = SD_MMC.usedBytes();
+#else
+    const uint64_t total = SD.totalBytes();
+    const uint64_t used  = SD.usedBytes();
+#endif
+    return total > used ? total - used : 0;
+}
+
+bool lock(bool forWrite, uint32_t timeoutMs) {
+    if (!sdMutex) return false;
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+
+    led::setActivity(true);
+    if (forWrite) {
+#if USB_FORCE_REATTACH
+        // Withdraw the card so the host stops reading and drops its FAT cache.
+        if (mediaWithdrawnDepth++ == 0) setMedia(false);
+#else
+        // The medium stays presented: a frame that sees it vanish stops its
+        // slideshow. The USB side is write-protected, so a host reading during
+        // the write cannot damage the card; the pulse when the batch closes
+        // makes it re-read. mediaWithdrawnDepth still counts open writes.
+        ++mediaWithdrawnDepth;
+#endif
+        noteBatchWrite();
+    }
+    refreshMountIfStale();
+    return true;
+}
+
+void unlock() {
+    if (!sdMutex) return;
+    if (mediaWithdrawnDepth > 0) {
+        // A long upload counts as activity until it finishes, not from its start.
+        if (batchOpen) batchLastWrite = millis();
+        if (--mediaWithdrawnDepth == 0) {
+            // Re-present it; the host re-reads the FAT and sees our changes.
+            setMedia(true);
+        }
+    }
+    led::setActivity(false);
+    xSemaphoreGive(sdMutex);
+}
+
+static void pulseMediaChanged();
+
+void refreshHostView() {
+    if (!sdMutex) return;
+    // Every write opened or extended a batch, and poll() tells the host when
+    // the batch closes, so there is nothing to do while one is open.
+    if (batchOpen) return;
+#if USB_FORCE_REATTACH
+    reattachUsb();
+#else
+    pulseMediaChanged();
+#endif
+}
+
+// Withdraws the medium, raises UNIT ATTENTION 28h/00 while it is withdrawn,
+// and presents it again: about 2.3 s in which the host sees no medium. Called
+// without sdMutex held.
+static void pulseMediaChanged() {
+    if (!usbStarted) return;
+    // setMedia only flips the flag TinyUSB reads; no card access, so no lock.
+    // Taking the lock here once meant a busy card could leave the medium
+    // withdrawn for good when the second take timed out.
+    setMedia(false);
+    // Give the host time to notice the removal before offering it back.
+    // 1500 ms is chosen to survive hosts that poll only every 500-1000 ms
+    // (Windows, many printers). The previous 600 ms was missed when the
+    // upload was tiny (50-byte file) and the whole offline window was short.
+    delay(1500);
+    // Raise the media-changed condition with the medium still withdrawn, and
+    // leave it withdrawn long enough for the host to collect it on a poll.
+    signalMediaChanged();
+    delay(USB_MEDIA_CHANGED_MS);
+    setMedia(true);
+    log("[usb] media re-presented to host");
+}
+
+bool beginBatch() {
+    if (!sdMutex) return false;
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) != pdTRUE) return false;
+    noteBatchWrite();          // leaves the bus if this is a new batch
+    // With USB not started (no card yet) nothing left the bus, so there is no
+    // batch to hold.
+    batchHeld = batchOpen;
+    batchEndRequested = false;
+    xSemaphoreGive(sdMutex);
+    if (batchHeld) log("[usb] explicit batch open until it ends");
+    return true;
+}
+
+void endBatchNow() {
+    if (batchOpen) {
+        batchHeld = false;
+        batchEndRequested = true;   // poll() closes it once no write is open
+        return;
+    }
+    refreshHostView();
+}
+
+bool batchPending() { return batchOpen; }
+
+void reattachHost() {
+    reattachUsb();
+}
+
+// Called from loop(). Two jobs, both of which used to need a power cycle.
+void poll() {
+    if (!sdMutex) return;
+    logUsbEvents();
+    const uint32_t now = millis();
+
+    // A card that has started failing is worse than an absent one: it still
+    // answers the geometry queries, so status reports "mounted" while every
+    // transfer times out and the host sees nothing but errors. Drop the mount
+    // and let the retry below rebuild it.
+    if (busFaulted) {
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;   // retried next loop
+        busFaulted = false;
+        log("[sd] %u consecutive transfer failures — dropping the mount",
+            (unsigned)consecutiveErrors);
+        consecutiveErrors = 0;
+        setMedia(false);
+        endBus();
+        mounted = false;
+        activeFreq = activeWidth = 0;
+        xSemaphoreGive(sdMutex);
+        lastMountAttempt = now;
+        return;
+    }
+
+    // Close a write batch once the card has been quiet long enough, or when
+    // asked to. Never while a write holds the lock, and never sooner than
+    // USB_DETACH_MS after it opened, so a host registers an unplug.
+    const uint32_t idleMs  = now - batchLastWrite;
+    const bool     expired = batchHeld ? idleMs >= USB_BATCH_ABANDON_MS
+                                       : idleMs >= USB_BATCH_QUIET_MS;
+    if (batchOpen && mediaWithdrawnDepth == 0 &&
+        (now - batchStartedAt) >= USB_DETACH_MS &&
+        (batchEndRequested || expired)) {
+        bool closed = false;
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            if (mediaWithdrawnDepth == 0) {
+                log("[usb] batch %s after %u ms: telling the host",
+                    batchEndRequested ? "ended" : (batchHeld ? "abandoned" : "went quiet"),
+                    (unsigned)(now - batchStartedAt));
+#if USB_FORCE_REATTACH
+                tud_connect();
+#endif
+                batchOpen = false;
+                batchHeld = false;
+                batchEndRequested = false;
+                closed = true;
+            }
+            xSemaphoreGive(sdMutex);
+        }
+#if !USB_FORCE_REATTACH
+        if (closed) pulseMediaChanged();
+#else
+        (void)closed;
+#endif
+    }
+
+    if (mounted) return;
+    if (lastMountAttempt != 0 && (now - lastMountAttempt) < retryDelayMs) return;
+    lastMountAttempt = now;
+
+    // The ladder is loud, and at one attempt every few seconds it would bury
+    // the console. Keep the first report and then one in ten.
+    static uint32_t attempts = 0;
+    const bool verbose = (attempts++ % 10) == 0;
+    quietMount = !verbose;
+    if (!verbose) esp_log_level_set("*", ESP_LOG_NONE);
+
+    bool ok = false;
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        // Probe the top rung only; if a card answers there, walk the full
+        // ladder to settle on the clock it is actually good for.
+        ok = mountCard(/*quick=*/true);
+        // The quick probe tries only the top rung and otherwise falls back to
+        // 400 kHz; walk the full ladder so a card that is merely marginal at
+        // the top speed does not stay at ~50 KB/s until the next reboot.
+        if (ok && activeFreq < SD_SPI_FREQ) {
+            endBus();
+            ok = mountCard(/*quick=*/false);
+        }
+        if (ok && (secSize == 0 || secCount == 0)) {
+            log("[sd] card reports zero geometry");
+            endBus();
+            ok = false;
+        }
+        mounted = ok;
+        xSemaphoreGive(sdMutex);
+    }
+    quietMount = false;
+    if (!verbose) esp_log_level_set("*", ESP_LOG_ERROR);
+
+    if (!ok) {
+        // Back off so a board left without a card is not spending most of
+        // loopTask on the SDMMC host.
+        retryDelayMs = min<uint32_t>(retryDelayMs * 2, SD_REMOUNT_MAX_MS);
+        if (verbose) {
+            log("[sd] still no card (attempt %u), retrying every %u s",
+                (unsigned)attempts, (unsigned)(retryDelayMs / 1000));
+        }
+        return;
+    }
+
+    log("[sd] card is back after %u attempts", (unsigned)attempts);
+    attempts = 0;
+    retryDelayMs = SD_REMOUNT_INTERVAL_MS;
+    if (!usbStarted) {
+        // No card at boot means USB never started; start it now so the drive
+        // appears without a reboot.
+        startUsb();
+    } else {
+        // The card may be a different one: tell USB its size before offering
+        // it, or the host keeps the old capacity.
+        msc.begin(secCount, secSize);
+        setMedia(true);
+        // With a batch open the host is told when it closes, so the frame is
+        // not interrupted twice.
+        if (!batchOpen) refreshHostView();
+    }
+}
+
+}  // namespace storage
