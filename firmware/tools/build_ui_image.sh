@@ -10,4 +10,4 @@ out="$here/../.pio/littlefs.bin"
 mkdir -p "$(dirname "$out")"
 "$mk" -c "$here/../data" -p 256 -b 4096 -s 0x140000 "$out" >/dev/null
 "$mk" -l -p 256 -b 4096 -s 0x140000 "$out"
-echo "write with: esptool --chip esp32s3 --port <port> write-flash 0x2B0000 \"$out\""
+echo "write with: pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port <port> write_flash 0x2B0000 \"$out\""

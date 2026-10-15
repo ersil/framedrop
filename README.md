@@ -105,19 +105,33 @@ load them from a secret manager.
 | `PHOTOFRAME_WIFI_SSID`, `PHOTOFRAME_WIFI_PASSWORD` | Optional. The home Wi-Fi the device joins when none is saved; leave the password empty for an open network. A network saved from the web page takes priority. |
 | `PHOTOFRAME_TZ` | Optional. POSIX TZ string for file timestamps, such as `PST8PDT,M3.2.0,M11.1.0` or `CET-1CEST,M3.5.0,M10.5.0/3`. Default `UTC0`. |
 
+### Setting up a Mac (optional)
+
 ```sh
-cd firmware
-pio run -e photoframe           # build
-pio run -e photoframe -t upload # flash the firmware over USB
-tools/build_ui_image.sh         # pack data/ into .pio/littlefs.bin
+# clang and git, which tools/build_ui_image.sh uses to build mklittlefs
+xcode-select --install
+# PlatformIO Core, and direnv to load the variables above from a .envrc
+brew install platformio direnv
 ```
 
-`pio run -t uploadfs` does not work on Apple Silicon, because PlatformIO's
-`mklittlefs` is an Intel-only binary. `tools/build_ui_image.sh` uses a native
-build in `.tools/mklittlefs` at the repo root, which
-`tools/build_mklittlefs.sh` builds from source on first use (mklittlefs 3.0.0,
-the release PlatformIO pins). Write the image to `0x2B0000` with esptool, as
-the script prints.
+The board shows up as `/dev/cu.usbmodem*`. On Apple Silicon,
+`pio run -t uploadfs` fails because PlatformIO's `mklittlefs` is an Intel-only
+binary, so build the web UI image with `tools/build_ui_image.sh` as below.
+
+### Building
+
+```sh
+cd firmware
+pio run -e photoframe            # build the firmware
+pio run -e photoframe -t upload  # flash it over USB
+tools/build_ui_image.sh          # pack data/ into .pio/littlefs.bin
+pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 \
+  --port <port> write_flash 0x2B0000 .pio/littlefs.bin  # flash the web UI
+```
+
+`tools/build_ui_image.sh` uses a native build in `.tools/mklittlefs` at the
+repo root, which `tools/build_mklittlefs.sh` builds from source on first use
+(mklittlefs 3.0.0, the release PlatformIO pins).
 
 ### Updating over Wi-Fi
 
