@@ -1,36 +1,19 @@
-# PrintDrop documentation
+# Firmware documentation
 
-Reference and background for the firmware. Start with the
-[project README](../README.md) for what PrintDrop is and how to use it, and
-[CONTRIBUTING.md](../CONTRIBUTING.md) for how to build and submit changes.
+These pages come from upstream PrintDrop and describe its own hardware: an
+ESP32-S3-DevKitC-1 with the card on SDIO. FrameDrop runs the same firmware on
+an ESP32-S3 SuperMini with a microSD breakout on SPI, so the pin, wiring and
+board details here do not apply to it. The [project README](../../README.md)
+covers FrameDrop's hardware, build and use. `architecture.md`, `hardware.md`
+and `flashing.md` start with a note on what differs.
 
 | Document | What's in it |
 |---|---|
-| [architecture.md](architecture.md) | How the pieces fit: USB/Wi-Fi arbitration, why the card is offered read-only, how two other projects solved the same problem, module layout, partition map, build environments, measured performance |
-| [hardware.md](hardware.md) | The board as measured, SD wiring, power requirements, verified SPI clocks |
-| [bugs.md](bugs.md) | Every fault found during the port and its root cause — why the code is shaped the way it is |
-| [flashing.md](flashing.md) | Getting this board into download mode, and why it is more awkward than it should be |
-
-`platformio.ini.original` is the upstream Cardputer build configuration, kept
-for reference against the current one.
-
-## Branding assets
-
-| File | Used by | Notes |
-|---|---|---|
-| `assets/printdrop_logo.webp` | source of truth | Full lockup, 1536×1024, transparent |
-| `assets/printdrop_banner.webp` | README, site hero | Lockup on a dark ground, 1200 px wide |
-| `data/logo.webp` | web UI, site favicon | Icon only, 256×256, flashed to the device |
-
-The wordmark sets "Print" in white, so the full lockup **needs a dark
-background** — on white, half of it disappears. That is why the banner is
-pre-flattened onto the brand navy and why the site commits to a dark theme. The
-square icon carries its own dark tile, so it is safe on any background and is
-the one used in the UI.
-
-## Why these notes exist
-
-The port from an M5Stack Cardputer to a bare ESP32-S3-DevKitC-1 turned up
-several faults that produce no useful error message — the device simply does
-nothing. Each is recorded with the evidence that identified it, so the same
-symptom does not have to be re-diagnosed from scratch.
+| [architecture.md](architecture.md) | How USB and Wi-Fi share the card, why the card is offered read-only, module layout, partition map, build environments |
+| [auth.md](auth.md) | The web login: where credentials live and how they are set |
+| [bugs.md](bugs.md) | Faults found during upstream's port and their root causes |
+| [discovery.md](discovery.md) | How the device is found on the network (mDNS and LLMNR) |
+| [flashing.md](flashing.md) | Getting the board into download mode |
+| [hardware.md](hardware.md) | Upstream's board, SD wiring and power |
+| [ota.md](ota.md) | The dual-slot OTA layout |
+| [sdio.md](sdio.md) | Upstream's SDIO card driver, which FrameDrop does not use |

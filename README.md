@@ -86,7 +86,7 @@ not mount; reformat them with macOS Disk Utility's MS-DOS (FAT) format.
 
 The firmware uses a patched copy of the core's SD library in
 `firmware/lib/SD`. It skips ACMD42 during card start-up, which leaves some
-cards unresponsive until power-cycled. `lib/SD/PHOTOFRAME.md`
+cards unresponsive until power-cycled. `lib/SD/README.md`
 describes the changes.
 
 ## Build and flash
@@ -214,11 +214,11 @@ saved on the device, so the build's values apply again, and restarts it.
   reflashed UI on its next visit.
 - `firmware/lib/WebServer` is a patched copy of the core's WebServer that
   bounds request sizes and waits, so a client cannot hang or crash the device
-  before the login check. `lib/WebServer/PHOTOFRAME.md` lists the changes.
+  before the login check. `lib/WebServer/README.md` lists the changes.
 
 ## License
 
 MIT, see `LICENSE`. The firmware is a fork of PrintDrop (MIT, `firmware/LICENSE`).
 `firmware/lib/SD` is Espressif's SD library (Apache-2.0) and
 `firmware/lib/WebServer` is the Arduino-ESP32 WebServer library (LGPL-2.1),
-each with local changes described in its `PHOTOFRAME.md`.
+each with local changes described in its `README.md`.

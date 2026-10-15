@@ -589,7 +589,7 @@ DSTATUS ff_sd_initialize(uint8_t pdrv)
     // photoframe: ACMD42 (APP_CLR_CARD_DETECT) is not sent. It only
     // disconnects the card's pull-up on CS, which a driven CS does not need,
     // and on the card tested here the next block read failed after it and
-    // the card stayed busy until power-cycled. See lib/SD/PHOTOFRAME.md.
+    // the card stayed busy until power-cycled. See lib/SD/README.md.
 
     if (card->type != CARD_SDHC) {
         if (sdTransaction(pdrv, SET_BLOCKLEN, 512, NULL) != 0x00) {

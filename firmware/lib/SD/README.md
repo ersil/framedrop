@@ -1,47 +1,17 @@
-# SD library
+# SD library (patched)
 
-This library provides the integration of ESP32 and SD (Secure Digital) and MMC (Multi Media Card) cards without additional modules. This library is using SPI to interface with the cards. Please note that SPI mode is slower than the intended SD or MMC mode, however, provides more flexibility as the SPI module is available on all ESP SoCs and can be routed to any GPIO through GPIO matrix.
+A copy of the SD library from the Arduino-ESP32 core used by this build
+(framework-arduinoespressif32 4.20017.260907, Arduino core 2.0.17).
+PlatformIO builds a library in the project's `lib/` folder in place of the
+framework's copy of the same name. Usage is unchanged; see the
+[upstream library](https://github.com/espressif/arduino-esp32/tree/2.0.17/libraries/SD).
 
-## Sample wiring diagram:
+There are two changes, both in `src/sd_diskio.cpp`:
 
-![Connections](http://i.imgur.com/4CoXOuR.png)
-
-For other SD formats:
-
-![Other SD card formats](https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/MMC-SD-miniSD-microSD-Color-Numbers-Names.gif/330px-MMC-SD-miniSD-microSD-Color-Numbers-Names.gif)
-
-Image source: [Wikipedia](https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/MMC-SD-miniSD-microSD-Color-Numbers-Names.gif/330px-MMC-SD-miniSD-microSD-Color-Numbers-Names.gif)
-
-> **Warning**
-Some ESP32 modules have different pin outs!
-
-## Default SPI pins:
-Note that SPI pins can be configured by using `SPI.begin(sck, miso, mosi, cs);` alternatively, you can change only the CS pin with `SD.begin(CSpin)`
-
-| SPI Pin Name | ESP8266 | ESP32 | ESP32-S2 | ESP32-C3 | ESP32-S3 |
-|--------------|---------|-------|----------|----------|----------|
-| CS (SS)      | GPIO15  | GPIO5 | GPIO5    | GPIO13   | GPIO13   |
-| DI (MOSI)    | GPIO13  | GPIO23| GPIO24   | GPIO14   | GPIO14   |
-| DO (MISO)    | GPIO12  | GPIO19| GPIO25   | GPIO15   | GPIO15   |
-| SCK (SCLK)   | GPIO14  | GPIO18| GPIO19   | GPIO16   | GPIO16   |
-
-## FAQ:
-
-**Do I need any additional modules**, like **the **Arduino**** SD module**?**
-
-No, just wire your SD card directly to ESP32.
-
-Tip: If you are using a microSD card and have a spare adapter to full-sized SD, you can solder Dupont pins on the adapter.
-
-
-**What is the difference between SD and SD_MMC libraries?**
-
-SD runs on SPI, and SD_MMC uses the SDMMC hardware bus on the ESP32.
-The SPI uses 4 communication pins + 2 power connections and operates on up to 80MHz. The SPI option offers flexibility on pin connection because the data connections can be routed through GPIO matrix to any data pin.
-SD-SPI speed is approximately half of the SD-MMC even when used on 1-bit line.
-You can read more about SD SPI in the [documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sdspi_host.html)
-
-SD_MMC is supported only by ESP32 and ESP32-S3 and can be connected only to dedicated pins. SD_MMC allows to use of 1, 4 or 8 data pins + 2 additional communication pins and 2 power pins. The data pins need to be pulled up externally.
-You can read more about SD_MMC in the [documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sdmmc_host.html)
-1-bit: SD_MMC_ speed is approximately two-times faster than SPI mode
-4-bit: SD_MMC speed is approximately three-times faster than SPI mode.
+- Card start-up no longer sends ACMD42 (APP_CLR_CARD_DETECT). With it, a
+  3.3 V SDHC card on SPI completed start-up, then failed the first block read
+  (CMD9), and ignored every command until it was power-cycled. Raw block reads
+  without ACMD42 were clean.
+- `sdcard_uninit()` no longer uses the card after freeing it. The
+  `AcquireSPI` guard's destructor dereferenced the card after `free(card)` on
+  every `SD.end()`. clang-analyzer reported it.
