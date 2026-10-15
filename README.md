@@ -44,8 +44,7 @@ not expose it to the internet.
 | GPIO 6 | SO (MISO) |
 | GPIO 7 | CS |
 
-Keep the wires short, with the clock wire shortest. The card runs over SPI at
-20 MHz.
+Keep the wires short, with the clock wire shortest.
 
 ## Install
 
@@ -54,23 +53,25 @@ Keep the wires short, with the clock wire shortest. The card runs over SPI at
 Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html).
 Building the web page image also needs `clang` and `git`.
 
-On a Mac (optional):
+On a Mac with [Homebrew](https://brew.sh) (optional):
 
 ```sh
-# clang and git
-xcode-select --install
-# PlatformIO Core, and direnv to load the settings in step 2 from a .envrc
-brew install platformio direnv
+# Homebrew's installer already set up clang and git
+brew install platformio
 ```
 
 ### 2. Choose the settings
 
-The build reads these environment variables and stops if a required one is
-missing. The firmware has no default passwords. To keep them out of your shell
-history, put them in a `.envrc` in the repo for [direnv](https://direnv.net)
-(Git ignores it) or load them from a secret manager.
+The build reads its settings from environment variables and stops if a
+required one is missing. The firmware has no default passwords. Set them in the
+shell you build from:
 
-| Variable | |
+```sh
+export PHOTOFRAME_WEB_PASSWORD='choose-a-password'
+export PHOTOFRAME_SETUP_PASSWORD='choose-another'
+```
+
+| Variable | Meaning |
 |---|---|
 | `PHOTOFRAME_WEB_PASSWORD` | Required. Password for the web page, user `admin`. |
 | `PHOTOFRAME_SETUP_PASSWORD` | Required. Password of the `PhotoFrame-Setup` Wi-Fi network the device opens when it has no Wi-Fi to join. 8 to 63 characters. |
@@ -109,8 +110,8 @@ builds and writes the firmware.
 
 When it finishes, unplug the S3 and plug it back in. Once the firmware finds
 the card, the S3's USB port becomes the drive and no longer accepts commands
-from your computer. To flash it over USB again, hold BOOT while pressing RESET.
-After that, use [updates over Wi-Fi](#updating).
+from your computer, so later updates go [over Wi-Fi](#updating). To flash it
+over USB anyway, hold BOOT while pressing RESET.
 
 ### 5. Connect it to your Wi-Fi
 
@@ -198,12 +199,13 @@ power-cycle the card and run the check again.
 
 ### Reading logs and crash reports
 
-- `http://photoframe.local/api/log` (needs the login) shows the last 4 KB of log lines. They
-  survive a crash or watchdog reset.
+- `http://photoframe.local/api/log` (needs the login) shows the last 4 KB of
+  log lines. They survive a crash or watchdog reset.
 - `http://photoframe.local/api/status` shows the firmware version, Wi-Fi,
   card and USB state, and why the device last restarted.
-- `http://photoframe.local/api/crash` (needs the login) summarises the last crash: task,
-  program counter, backtrace, and the SHA-256 of the firmware that crashed.
+- `http://photoframe.local/api/crash` (needs the login) summarises the last
+  crash: task, program counter, backtrace, and the SHA-256 of the firmware
+  that crashed.
   Turn the addresses into source lines with the `firmware.elf` whose SHA-256
   matches:
 

@@ -1,6 +1,5 @@
 .DS_Store
 .tools/
 .envrc
-.direnv/
 .cache/
 compile_commands.json
