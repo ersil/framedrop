@@ -155,7 +155,7 @@
     while (!$('#modal').classList.contains('hidden')) await sleep(200);
     if (authCancelled) return false;
     const u = authUser || 'admin';
-    const p = await openModal({ title: 'Password', msg: 'Password for ' + u, showInput: true, password: true, placeholder: 'password', okText: 'Log in' });
+    const p = await openModal({ title: 'Password', msg: 'Password for ' + u, password: true, user: u, okText: 'Log in' });
     if (p === false) { authCancelled = true; return false; }
     setAuth(u, String(p));
     return true;
@@ -347,20 +347,26 @@
 
   // --- Modal -----------------------------------------------------------------------------
   let modalResolve = null;
-  function openModal({ title, msg, placeholder, inputValue, okText, showInput, password }) {
+  function openModal({ title, msg, placeholder, inputValue, okText, showInput, password, user }) {
     if (modalResolve) closeModal(false);
     $('#modalTitle').textContent = title || ''; $('#modalMsg').textContent = msg || '';
     const wrap = $('#modalInputWrap'), inp = $('#modalInput');
     wrap.classList.toggle('hidden', !showInput);
-    if (showInput) { inp.type = password ? 'password' : 'text'; inp.value = inputValue || ''; inp.placeholder = placeholder || ''; setTimeout(() => inp.focus(), 30); }
+    if (showInput) { inp.value = inputValue || ''; inp.placeholder = placeholder || ''; setTimeout(() => inp.focus(), 30); }
+    // The password prompt is a real form (username + current-password) so password managers fill the
+    // right field and offer to save after a login; OK submits it, the handler below does the rest.
+    $('#modalAuth').classList.toggle('hidden', !password);
+    if (password) { $('#modalUser').value = user || ''; $('#modalPass').value = ''; setTimeout(() => $('#modalPass').focus(), 30); }
+    $('#modalOk').type = password ? 'submit' : 'button';
     $('#modalOk').textContent = okText || 'OK';
     $('#modal').classList.remove('hidden');
     return new Promise(res => { modalResolve = res; });
   }
-  function closeModal(v) { $('#modal').classList.add('hidden'); if (modalResolve) { const r = modalResolve; modalResolve = null; r(v); } }
+  function closeModal(v) { $('#modal').classList.add('hidden'); $('#modalPass').value = ''; if (modalResolve) { const r = modalResolve; modalResolve = null; r(v); } }
   $('#modalCancel').addEventListener('click', () => closeModal(false));
   $('#modalBg').addEventListener('click', () => closeModal(false));
-  $('#modalOk').addEventListener('click', () => closeModal($('#modalInputWrap').classList.contains('hidden') ? true : $('#modalInput').value));
+  $('#modalOk').addEventListener('click', () => { if (!$('#modalAuth').classList.contains('hidden')) return; closeModal($('#modalInputWrap').classList.contains('hidden') ? true : $('#modalInput').value); });
+  $('#modalAuth').addEventListener('submit', e => { e.preventDefault(); closeModal($('#modalPass').value); });
   $('#modalInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); closeModal(e.target.value); } });
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;

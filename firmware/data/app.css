@@ -166,5 +166,6 @@ input:focus-visible,button:focus-visible,.btn:focus-within{outline:2px solid var
 .modal__bg{position:absolute;inset:0;background:rgba(0,0,0,.5)}
 .modal__box{position:relative;background:var(--surface);border-radius:var(--r);padding:18px;width:100%;max-width:400px}
 .modal__box label{display:block;margin:8px 0}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
