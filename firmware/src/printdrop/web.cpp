@@ -45,6 +45,11 @@ size_t   uploadBufLen = 0;
 uint32_t uploadCardUs = 0;
 
 String uploadError;
+// uploadError is a String, and assigning a message to it allocates. With the
+// heap exhausted the assignment fails and leaves it empty, which used to read
+// as "no error": END then renamed a truncated .partial over the photo and
+// reported success. This flag is what decides; uploadError is only the text.
+bool   uploadFailed = false;
 String uploadName;
 String uploadTmp;     // where the bytes go until the upload completes
 size_t uploadBytes = 0;
@@ -56,16 +61,38 @@ size_t   uploadExpected  = 0;
 uint32_t uploadStartMs   = 0;
 uint32_t lastProgressMs  = 0;
 
-// Writes the buffered bytes to the card. Returns false and sets uploadError
+void failUpload(const char* msg) {
+    uploadFailed = true;
+    uploadError = msg;
+}
+
+// Closes this request's upload file and, when removeTmp is set, removes the
+// .partial file it was writing. Returns false if the card lock is not free in
+// waitMs; the file then stays open with uploadTmp and uploadHoldsLock kept,
+// and the next request's cleanup tries again (it used to be left open with
+// uploadHoldsLock cleared, so the .partial file was never removed).
+bool releaseUploadFile(bool removeTmp, uint32_t waitMs) {
+    if (!uploadFile && !uploadHoldsLock) return true;
+    if (!storage::lock(true, waitMs)) return false;
+    if (uploadFile) uploadFile.close();
+    if (removeTmp && uploadHoldsLock && !uploadTmp.isEmpty() && SD_FS.exists(uploadTmp)) {
+        SD_FS.remove(uploadTmp);
+    }
+    uploadHoldsLock = false;
+    storage::unlock();
+    return true;
+}
+
+// Writes the buffered bytes to the card. Returns false and fails the upload
 // on failure.
 bool flushUploadBuf() {
     if (uploadBufLen == 0) return true;
-    if (!storage::lock(true, 5000)) { uploadError = "Card busy"; return false; }
+    if (!storage::lock(true, 5000)) { failUpload("Card busy"); return false; }
     const uint32_t t0 = micros();
     const bool ok = uploadFile.write(uploadBuf, uploadBufLen) == uploadBufLen;
     uploadCardUs += micros() - t0;
     storage::unlock();
-    if (!ok) { uploadError = "Write failed — card full?"; return false; }
+    if (!ok) { failUpload("Write failed — card full?"); return false; }
     uploadBufLen = 0;
     return true;
 }
@@ -575,12 +602,13 @@ void handleUploadData() {
         // delete the last uploaded file).
         uploadName = "";
         uploadError = "";
+        uploadFailed = false;
         if (!originAllowed()) {
-            uploadError = "Cross-site request refused";
+            failUpload("Cross-site request refused");
             return;
         }
         if (auth::isRequired() && !auth::checkBasicAuth(server.header("Authorization"))) {
-            uploadError = "Authentication required";
+            failUpload("Authentication required");
             return;
         }
         // A phone that leaves Wi-Fi mid-upload sends no FIN. The patched
@@ -611,15 +639,15 @@ void handleUploadData() {
         String dir;
         // Query-string arguments are parsed before the multipart body, so this
         // is readable here (see WebServer::_parseRequest).
-        if (!safePath(server.arg("path"), dir)) { uploadError = "Invalid path"; return; }
+        if (!safePath(server.arg("path"), dir)) { failUpload("Invalid path"); return; }
 
         String name = up.filename;
         const int slash = name.lastIndexOf('/');
         if (slash >= 0) name = name.substring(slash + 1);
-        if (name.isEmpty()) { uploadError = "Missing filename"; return; }
-        if (name.length() > 200) { uploadError = "Filename too long"; return; }
+        if (name.isEmpty()) { failUpload("Missing filename"); return; }
+        if (name.length() > 200) { failUpload("Filename too long"); return; }
         uploadName = joinPath(dir, name);
-        { String checked; if (!safePath(uploadName, checked)) { uploadError = "Invalid filename"; return; } }
+        { String checked; if (!safePath(uploadName, checked)) { failUpload("Invalid filename"); return; } }
 
         // The card lock is taken per card operation, not for the whole
         // upload: the frame keeps reading the drive during a batch, and its
@@ -627,22 +655,27 @@ void handleUploadData() {
         // from start to end. uploadHoldsLock now means "this request opened
         // uploadName", which is what decides whether an abort may remove it.
         if (!uploadBuf) uploadBuf = (uint8_t*)malloc(kUploadBufSize);
-        if (!uploadBuf) { uploadError = "Out of memory"; return; }
+        if (!uploadBuf) { failUpload("Out of memory"); return; }
         uploadBufLen = 0;
         uploadCardUs = 0;
-        if (!storage::lock(true, 20000)) { uploadError = "Card busy"; return; }
+        // A file an earlier request could not close (the card lock timed
+        // out) is closed and its .partial removed before this one starts.
+        if (!releaseUploadFile(true, 20000)) { failUpload("Card busy"); return; }
         // Write to a temporary name and rename over the target only once the
         // upload is complete, so a failed re-upload of an existing name does
-        // not take the original photo with it.
+        // not take the original photo with it. A failed allocation leaves the
+        // String with a NULL buffer, which SD_FS.exists() would pass to strlen.
         uploadTmp = uploadName + ".partial";
+        if (!uploadTmp.c_str() || uploadTmp.isEmpty()) { failUpload("Out of memory"); return; }
+        if (!storage::lock(true, 20000)) { failUpload("Card busy"); return; }
         if (SD_FS.exists(uploadTmp)) SD_FS.remove(uploadTmp);
         uploadFile = SD_FS.open(uploadTmp, FILE_WRITE);
-        if (!uploadFile) uploadError = "Could not open file for writing";
+        if (!uploadFile) failUpload("Could not open file for writing");
         else uploadHoldsLock = true;
         storage::unlock();
 
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (uploadFile && uploadError.isEmpty()) {
+        if (uploadFile && !uploadFailed) {
             bool wrote = true;
             size_t off = 0;
             while (wrote && off < up.currentSize) {
@@ -686,25 +719,27 @@ void handleUploadData() {
         }
 
     } else if (up.status == UPLOAD_FILE_END) {
-        if (uploadFile && uploadError.isEmpty()) flushUploadBuf();
+        if (uploadFile && !uploadFailed) flushUploadBuf();
         if (uploadFile && storage::lock(true, 20000)) {
             uploadFile.close();
             if (uploadHoldsLock) {
-                if (uploadError.isEmpty()) {
+                if (!uploadFailed) {
                     if (SD_FS.exists(uploadName)) SD_FS.remove(uploadName);
-                    if (!SD_FS.rename(uploadTmp, uploadName)) uploadError = "Could not finish writing the file";
+                    if (!SD_FS.rename(uploadTmp, uploadName)) failUpload("Could not finish writing the file");
                 }
                 // A failed write (card full, card busy) leaves a truncated file
                 // the frame would try to show. Remove this request's own.
-                if (!uploadError.isEmpty() && SD_FS.exists(uploadTmp)) SD_FS.remove(uploadTmp);
+                if (uploadFailed && SD_FS.exists(uploadTmp)) SD_FS.remove(uploadTmp);
             }
+            uploadHoldsLock = false;
             storage::unlock();
         } else if (uploadFile) {
-            uploadError = "Card busy";
+            // The file stays open and uploadHoldsLock stays set, so
+            // releaseUploadFile() can still close it and remove the .partial.
+            failUpload("Card busy");
         }
-        uploadHoldsLock = false;
         led::setActivity(false);
-        if (uploadError.isEmpty()) {
+        if (!uploadFailed) {
             const uint32_t elapsed = millis() - uploadStartMs;
             const uint32_t rate = elapsed ? (uint32_t)((uint64_t)uploadBytes * 1000ULL / elapsed) : 0;
             log("[web] uploaded %s (%u bytes in %u ms, %u KB/s; card writes %u ms)",
@@ -721,34 +756,34 @@ void handleUploadData() {
         // Only a request that opened a file touches the card: a write lock
         // opens a batch, and an unauthenticated POST dropped mid-body would
         // otherwise make the frame re-read the card 30 s later.
-        if ((uploadFile || uploadHoldsLock) && storage::lock(true, 20000)) {
-            if (uploadFile) uploadFile.close();
-            if (uploadHoldsLock && !uploadTmp.isEmpty() && SD_FS.exists(uploadTmp)) {
-                SD_FS.remove(uploadTmp);
-            }
-            storage::unlock();
-        }
-        uploadHoldsLock = false;
+        releaseUploadFile(true, 20000);
         led::setActivity(false);
-        uploadError = "Upload aborted";
+        failUpload("Upload aborted");
     }
 }
 
 // Upload state is per request; clear it however the request ends, or the next
 // request without a file part reports this one's name or error.
+// A file still open here (its close timed out on the card lock) keeps
+// uploadTmp and uploadHoldsLock, so the next upload can close it and remove
+// the .partial.
 struct UploadStateReset {
-    ~UploadStateReset() { uploadName = ""; uploadTmp = ""; uploadError = ""; uploadHoldsLock = false; }
+    ~UploadStateReset() {
+        uploadName = ""; uploadError = ""; uploadFailed = false;
+        if (!uploadFile) { uploadTmp = ""; uploadHoldsLock = false; }
+    }
 };
 
 void handleUploadDone() {
     UploadStateReset reset;
+    // Retry a close that timed out at UPLOAD_FILE_END.
+    if (uploadFile) releaseUploadFile(true, 5000);
     if (!isMultipart()) return sendError(400, "Expected multipart/form-data with a file field");
     if (auth::isRequired() && !auth::checkBasicAuth(server.header("Authorization"))) {
-        if (uploadFile && storage::lock(true, 5000)) { uploadFile.close(); storage::unlock(); }
-        uploadHoldsLock = false;
+        releaseUploadFile(true, 5000);
         return sendError(401, "Authentication required");
     }
-    if (!uploadError.isEmpty()) return sendError(500, uploadError);
+    if (uploadFailed) return sendError(500, uploadError.isEmpty() ? String("Upload failed") : uploadError);
     // uploadName is reset at UPLOAD_FILE_START; still empty means no file part
     // arrived, and the previous upload's name must not be reported as this one.
     if (uploadName.isEmpty()) return sendError(400, "No file in the request");
@@ -863,6 +898,7 @@ void handleAuthSet() {
 // --- API: OTA --------------------------------------------------------------
 
 String otaError;
+bool   otaFailed = false;   // see uploadFailed: the String can fail to hold the message
 bool   otaHoldsLock = false;
 
 void handleOtaStatus() {
@@ -895,7 +931,13 @@ void handleOtaUploadDone() {
     // A failed request (a second file part, a write error, an abort) must not
     // leave the update open: every later OTA would fail until a reboot, and a
     // UI update would leave LittleFS unmounted.
-    if (!otaError.isEmpty()) { ota::abortUpdate(); String e=otaError; otaError=""; sendError(500, e); return; }
+    if (otaFailed) {
+        ota::abortUpdate();
+        String e = otaError.isEmpty() ? String("Update failed") : otaError;
+        otaError = ""; otaFailed = false;
+        sendError(500, e);
+        return;
+    }
     String err;
     if (!ota::endUpdate(&err)) return sendError(500, err);
     log("[ota] HTTP OTA complete, rebooting");
@@ -911,11 +953,12 @@ void handleOtaUploadData() {
     HTTPUpload& up = server.upload();
     if (up.status == UPLOAD_FILE_START) {
         otaError = "";
+        otaFailed = false;
         // Check credentials here, not only in handleOtaUploadDone: the data
         // callbacks run first, so an unauthenticated POST would otherwise write
         // a whole image into the OTA partition before being turned away.
         if (auth::isRequired() && !auth::checkBasicAuth(server.header("Authorization"))) {
-            otaError = "Authentication required";
+            otaError = "Authentication required"; otaFailed = true;
             return;
         }
         String err;
@@ -924,17 +967,17 @@ void handleOtaUploadData() {
         if (total == 0) total = UPDATE_SIZE_UNKNOWN;
         // ?target=ui writes the web UI image (.pio/littlefs.bin) instead.
         const bool ui = server.arg("target") == "ui";
-        if (!ota::beginUpdate(total, &err, ui)) { otaError = err; return; }
+        if (!ota::beginUpdate(total, &err, ui)) { otaError = err; otaFailed = true; return; }
         log("[ota] HTTP OTA started (%s)", ui ? "web UI image" : "firmware");
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (!otaError.isEmpty()) return;
+        if (otaFailed) return;
         String err;
-        if (!ota::writeUpdate(up.buf, up.currentSize, &err)) { otaError = err; ota::abortUpdate(); }
+        if (!ota::writeUpdate(up.buf, up.currentSize, &err)) { otaError = err; otaFailed = true; ota::abortUpdate(); }
     } else if (up.status == UPLOAD_FILE_END) {
         // handled in done
     } else if (up.status == UPLOAD_FILE_ABORTED) {
         ota::abortUpdate();
-        otaError = "Upload aborted";
+        otaError = "Upload aborted"; otaFailed = true;
     }
 }
 

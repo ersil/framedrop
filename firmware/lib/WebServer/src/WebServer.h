@@ -174,6 +174,7 @@ protected:
   bool _parseFormUploadAborted();
   void _uploadWriteByte(uint8_t b);
   int _uploadReadByte(WiFiClient& client);
+  bool _readFormLine(WiFiClient& client, String& line);
   void _prepareHeader(String& response, int code, const char* content_type, size_t contentLength);
   bool _collectHeader(const char* headerName, const char* headerValue);
 

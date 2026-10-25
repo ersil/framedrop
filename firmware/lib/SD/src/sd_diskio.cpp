@@ -316,9 +316,14 @@ bool sdWriteSector(uint8_t pdrv, const char* buffer, unsigned long long sector)
             char token = sdWriteBytes(pdrv, buffer, 0xFE);
             sdDeselectCard(pdrv);
 
-            if (token == 0x0A) {
+            // photoframe: sdWriteBytes returns the data response masked to
+            // 0x1F. The stock code tested 0x0A and 0x0C, which a card never
+            // sends, so a CRC error (0x0B), a write error (0x0D) or a busy
+            // timeout (0) fell through and was reported as written. Only 0x05
+            // means the card took the block; a CRC error is retried.
+            if (token == 0x0B) {
                 continue;
-            } else if (token == 0x0C) {
+            } else if (token != 0x05) {
                 return false;
             }
 
@@ -343,7 +348,15 @@ bool sdWriteSectors(uint8_t pdrv, const char* buffer, unsigned long long sector,
     int currentCount = count;
     ardu_sdcard_t * card = s_cards[pdrv];
 
+    // photoframe: f counts rounds that stored nothing. It used to be reset
+    // whenever a block was accepted, so a card that took one block and then
+    // failed every round, with ACMD22 reporting 0 (or an MMC card, which has
+    // no ACMD22), restarted from the same sector forever while holding the
+    // storage lock.
     for (int f = 0; f < 3;) {
+        const char* roundBuffer = currentBuffer;
+        const unsigned long long roundSector = currentSector;
+        const int roundCount = currentCount;
         if (card->type != CARD_MMC) {
             if (sdTransaction(pdrv, SET_WR_BLK_ERASE_COUNT, currentCount, NULL)) {
                 return false;
@@ -362,7 +375,6 @@ bool sdWriteSectors(uint8_t pdrv, const char* buffer, unsigned long long sector,
                     break;
                 }
                 currentBuffer += 512;
-                f = 0;
             } while (--currentCount);
 
             if (!sdWait(pdrv, 500)) {
@@ -383,24 +395,35 @@ bool sdWriteSectors(uint8_t pdrv, const char* buffer, unsigned long long sector,
                     break;
                 }
 
-                if (token == 0x0A) {
+                // photoframe: 0x0B is the CRC-error response; the stock code
+                // tested 0x0A, which a card never sends. ACMD22 counts the
+                // blocks written by this CMD25 only, so the resume point is
+                // relative to this round, and a count larger than the blocks
+                // the card accepted is refused: it used to move the buffer
+                // pointer past the caller's data, which was then sent to the
+                // card.
+                if (token == 0x0B) {
                     sdDeselectCard(pdrv);
                     unsigned int writtenBlocks = 0;
                     if (card->type != CARD_MMC && sdSelectCard(pdrv)) {
                         if (!sdCommand(pdrv, SEND_NUM_WR_BLOCKS, 0, NULL)) {
-                            char acmdData[4];
-                            if (sdReadBytes(pdrv, acmdData, 4)) {
-                                writtenBlocks = acmdData[0] << 24;
-                                writtenBlocks |= acmdData[1] << 16;
-                                writtenBlocks |= acmdData[2] << 8;
+                            uint8_t acmdData[4];
+                            if (sdReadBytes(pdrv, (char*)acmdData, 4)) {
+                                writtenBlocks = (unsigned int)acmdData[0] << 24;
+                                writtenBlocks |= (unsigned int)acmdData[1] << 16;
+                                writtenBlocks |= (unsigned int)acmdData[2] << 8;
                                 writtenBlocks |= acmdData[3];
                             }
                         }
                         sdDeselectCard(pdrv);
                     }
-                    currentBuffer = buffer + (writtenBlocks << 9);
-                    currentSector = sector + writtenBlocks;
-                    currentCount = count - writtenBlocks;
+                    if (writtenBlocks > (unsigned int)(roundCount - currentCount)) {
+                        return false;
+                    }
+                    if (writtenBlocks > 0) f = 0;
+                    currentBuffer = roundBuffer + (writtenBlocks << 9);
+                    currentSector = roundSector + writtenBlocks;
+                    currentCount = roundCount - writtenBlocks;
                     continue;
                 } else {
                     break;

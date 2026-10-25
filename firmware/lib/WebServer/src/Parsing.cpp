@@ -104,6 +104,12 @@ bool WebServer::_parseRequest(WiFiClient& client) {
   String methodStr = req.substring(0, addr_start);
   String url = req.substring(addr_start + 1, addr_end);
   String versionEnd = req.substring(addr_end + 8);
+  // photoframe: a String whose allocation failed has a NULL buffer, and
+  // atoi(NULL) panicked the board when a request arrived with the heap short.
+  if (!methodStr.c_str() || !url.c_str() || !versionEnd.c_str()) {
+    log_e("out of memory parsing the request line");
+    return false;
+  }
   _currentVersion = atoi(versionEnd.c_str());
   String searchStr = "";
   int hasSearch = url.indexOf('?');
@@ -151,6 +157,12 @@ bool WebServer::_parseRequest(WiFiClient& client) {
     while(1){
       req = client.readStringUntil('\r');
       client.readStringUntil('\n');
+      // photoframe: header lines had no length limit, so one client could
+      // fill the heap before any handler or auth check ran.
+      if (req.length() > PHOTOFRAME_MAX_REQUEST_LINE) {
+        log_e("header line too long (%u)", (unsigned)req.length());
+        return false;
+      }
       if (req == "") break;//no moar headers
       int headerDiv = req.indexOf(':');
       if (headerDiv == -1){
@@ -185,6 +197,12 @@ bool WebServer::_parseRequest(WiFiClient& client) {
         }
       } else if (headerName.equalsIgnoreCase(F("Content-Length"))){
         _clientContentLength = headerValue.toInt();
+        // photoframe: a negative length passed the body-size check and sent
+        // the raw path reading for as long as the client kept sending.
+        if (_clientContentLength < 0) {
+          log_e("negative Content-Length refused");
+          return false;
+        }
       } else if (headerName.equalsIgnoreCase(F("Host"))){
         _hostHeader = headerValue;
       }
@@ -261,6 +279,12 @@ bool WebServer::_parseRequest(WiFiClient& client) {
     while(1){
       req = client.readStringUntil('\r');
       client.readStringUntil('\n');
+      // photoframe: header lines had no length limit, so one client could
+      // fill the heap before any handler or auth check ran.
+      if (req.length() > PHOTOFRAME_MAX_REQUEST_LINE) {
+        log_e("header line too long (%u)", (unsigned)req.length());
+        return false;
+      }
       if (req == "") break;//no moar headers
       int headerDiv = req.indexOf(':');
       if (headerDiv == -1){
@@ -388,22 +412,60 @@ int WebServer::_uploadReadByte(WiFiClient& client) {
   return res;
 }
 
+// photoframe: reads one CRLF-terminated line of a multipart body.
+// readStringUntil returns "" both for an empty line and for a client that
+// stopped sending, so the part loops in _parseForm could not tell the two apart
+// and spun forever on a truncated upload, with no watchdog to reset the board.
+// This returns false instead when the client sends nothing for
+// HTTP_MAX_POST_WAIT, when the line passes PHOTOFRAME_MAX_FORM_BODY, or when
+// the String cannot grow.
+bool WebServer::_readFormLine(WiFiClient& client, String& line) {
+  char buf[65];   // String::concat copies one byte past the length, the NUL
+  size_t n = 0;
+  line = "";
+  while (true) {
+    int c = _uploadReadByte(client);
+    if (c < 0) return false;
+    if (c == '\r') break;
+    buf[n++] = (char)c;
+    if (n == sizeof(buf) - 1) {
+      buf[n] = 0;
+      if (line.length() + n > PHOTOFRAME_MAX_FORM_BODY || !line.concat(buf, n)) return false;
+      n = 0;
+    }
+  }
+  buf[n] = 0;
+  if (n && (line.length() + n > PHOTOFRAME_MAX_FORM_BODY || !line.concat(buf, n))) return false;
+  return _uploadReadByte(client) == '\n';
+}
+
 bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
   (void) len;
   log_v("Parse Form: Boundary: %s Length: %d", boundary.c_str(), len);
   String line;
   int retry = 0;
   do {
-    line = client.readStringUntil('\r');
+    if (!_readFormLine(client, line)) return false;
     ++retry;
   } while (line.length() == 0 && retry < 3);
 
-  client.readStringUntil('\n');
   //start reading the form
   if (line == ("--"+boundary)){
    if(_postArgs) delete[] _postArgs;
     _postArgs = new RequestArgument[WEBSERVER_MAX_POST_ARGS];
     _postArgsLen = 0;
+    // photoframe: a failed request frees the argument table here instead of
+    // leaving up to 31 stored values allocated until the next multipart
+    // request.
+    auto fail = [this]() {
+      delete[] _postArgs;
+      _postArgs = nullptr;
+      _postArgsLen = 0;
+      return false;
+    };
+    // photoframe: field values are buffered before any handler or auth check
+    // runs; their total is held to the same limit as a plain form body.
+    size_t fieldBytes = 0;
     while(1){
       String argName;
       String argValue;
@@ -411,8 +473,7 @@ bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
       String argFilename;
       bool argIsFile = false;
 
-      line = client.readStringUntil('\r');
-      client.readStringUntil('\n');
+      if (!_readFormLine(client, line)) return fail();
       if (line.length() > 19 && line.substring(0, 19).equalsIgnoreCase(F("Content-Disposition"))){
         int nameStart = line.indexOf('=');
         if (nameStart != -1){
@@ -432,22 +493,24 @@ bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
           log_v("PostArg Name: %s", argName.c_str());
           using namespace mime;
           argType = FPSTR(mimeTable[txt].mimeType);
-          line = client.readStringUntil('\r');
-          client.readStringUntil('\n');
+          if (!_readFormLine(client, line)) return fail();
           if (line.length() > 12 && line.substring(0, 12).equalsIgnoreCase(FPSTR(Content_Type))){
             argType = line.substring(line.indexOf(':')+2);
             //skip next line
-            client.readStringUntil('\r');
-            client.readStringUntil('\n');
+            if (!_readFormLine(client, line)) return fail();
           }
           log_v("PostArg Type: %s", argType.c_str());
           if (!argIsFile){
             while(1){
-              line = client.readStringUntil('\r');
-              client.readStringUntil('\n');
+              if (!_readFormLine(client, line)) return fail();
               if (line.startsWith("--"+boundary)) break;
-              if (argValue.length() > 0) argValue += "\n";
-              argValue += line;
+              fieldBytes += line.length() + 1;
+              if (fieldBytes > PHOTOFRAME_MAX_FORM_BODY) {
+                log_e("form fields too large (%u)", (unsigned)fieldBytes);
+                return fail();
+              }
+              if (argValue.length() > 0 && !argValue.concat('\n')) return fail();
+              if (!argValue.concat(line)) return fail();
             }
             log_v("PostArg Value: %s", argValue.c_str());
 
@@ -460,7 +523,7 @@ bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
               break;
             } else if (_postArgsLen >= WEBSERVER_MAX_POST_ARGS) {
               log_e("Too many PostArgs (max: %d) in request.", WEBSERVER_MAX_POST_ARGS);
-              return false;
+              return fail();
             }
           } else {
             _currentUpload.reset(new HTTPUpload());
@@ -483,6 +546,7 @@ bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
                 int ret = _uploadReadByte(client);
                 if (ret < 0) {
                     // Unexpected, we should have had data available per above
+                    fail();
                     return _parseFormUploadAborted();
                 }
                 char in = (char) ret;
@@ -519,9 +583,10 @@ bool WebServer::_parseForm(WiFiClient& client, String boundary, uint32_t len){
                 _currentUpload->filename.c_str(),
                 _currentUpload->type.c_str(),
                 (int)_currentUpload->totalSize);
-            if (!client.connected()) return _parseFormUploadAborted();
-            line = client.readStringUntil('\r');
-            client.readStringUntil('\n');
+            if (!client.connected() || !_readFormLine(client, line)) {
+              fail();
+              return _parseFormUploadAborted();
+            }
             if (line == "--") {     // extra two dashes mean we reached the end of all form fields
                 log_v("Done Parsing POST");
                 break;
